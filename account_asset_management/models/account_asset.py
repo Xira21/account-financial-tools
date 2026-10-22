@@ -523,6 +523,17 @@ class AccountAsset(models.Model):
             "context": ctx,
         }
 
+    def modify_value(self):
+        self.ensure_one()
+        return {
+            "name": self.env._("Modify Asset Value"),
+            "view_mode": "form",
+            "res_model": "account.asset.modify",
+            "target": "new",
+            "type": "ir.actions.act_window",
+            "context": dict(self.env.context, active_ids=self.ids, active_id=self.id),
+        }
+
     def set_to_draft(self):
         return self.write({"state": "draft"})
 
@@ -619,6 +630,21 @@ class AccountAsset(models.Model):
                     seq -= 1
             line_i_start = 0
 
+    def _get_posted_depreciation_lines(self):
+        """Depreciation lines already accounted for: posted or initial balance.
+        Most recent first."""
+        self.ensure_one()
+        return self.env["account.asset.line"].search(
+            [
+                ("asset_id", "=", self.id),
+                ("type", "=", "depreciate"),
+                "|",
+                ("move_check", "=", True),
+                ("init_entry", "=", True),
+            ],
+            order="line_date desc",
+        )
+
     def compute_depreciation_board(self):
         line_obj = self.env["account.asset.line"]
 
@@ -626,14 +652,7 @@ class AccountAsset(models.Model):
             currency = asset.company_id.currency_id
             if currency.is_zero(asset.value_residual):
                 continue
-            domain = [
-                ("asset_id", "=", asset.id),
-                ("type", "=", "depreciate"),
-                "|",
-                ("move_check", "=", True),
-                ("init_entry", "=", True),
-            ]
-            posted_lines = line_obj.search(domain, order="line_date desc")
+            posted_lines = asset._get_posted_depreciation_lines()
             if posted_lines:
                 last_line = posted_lines[0]
             else:

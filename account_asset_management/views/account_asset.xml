@@ -28,6 +28,14 @@
                         invisible="state not in ['open', 'close']"
                         help="Asset removal."
                     />
+                    <button
+                        name="modify_value"
+                        string="Modify Value"
+                        type="object"
+                        groups="account.group_account_manager"
+                        invisible="state != 'open'"
+                        help="Increase or decrease the value of a running asset."
+                    />
                     <field
                         name="state"
                         widget="statusbar"
