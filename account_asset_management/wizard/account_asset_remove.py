@@ -3,8 +3,6 @@
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
 
-from dateutil.relativedelta import relativedelta
-
 from odoo import Command, api, fields, models
 from odoo.exceptions import UserError, ValidationError
 
@@ -233,70 +231,22 @@ class AccountAssetRemove(models.TransientModel):
         """
         Generate last depreciation entry on the day before the removal date.
         """
-        date_remove = self.date_remove
-        asset_line_obj = self.env["account.asset.line"]
-
-        currency = asset.company_id.currency_id
-
-        def _dlines(asset):
-            lines = asset.depreciation_line_ids
-            dlines = lines.filtered(
-                lambda line: line.type == "depreciate"
-                and not line.init_entry
-                and not line.move_check
-            )
-            dlines = dlines.sorted(key=lambda line: line.line_date)
-            return dlines
-
-        dlines = _dlines(asset)
+        dlines = asset._get_pending_depreciation_lines()
         if not dlines:
             asset.compute_depreciation_board()
-            dlines = _dlines(asset)
+            dlines = asset._get_pending_depreciation_lines()
         if not dlines:
             return asset.value_residual
-        first_to_depreciate_dl = dlines[0]
-
-        first_date = first_to_depreciate_dl.line_date
-        if date_remove > first_date:
+        if self.date_remove > dlines[0].line_date:
             raise UserError(
                 self.env._(
                     "You can't make an early removal if all the depreciation "
                     "lines for previous periods are not posted."
                 )
             )
-
-        if first_to_depreciate_dl.previous_id:
-            last_depr_date = first_to_depreciate_dl.previous_id.line_date
-        else:
-            create_dl = asset_line_obj.search(
-                [("asset_id", "=", asset.id), ("type", "=", "create")]
-            )
-            last_depr_date = create_dl.line_date
-
-        # Never create move.
-        same_month = (
-            last_depr_date.month == first_to_depreciate_dl.line_date.month and 1 or 0
-        )
-
-        period_number_days = (first_date - last_depr_date).days + same_month
-        new_line_date = date_remove + relativedelta(days=-1)
-        to_depreciate_days = (new_line_date - last_depr_date).days + same_month
-        to_depreciate_amount = currency.round(
-            float(to_depreciate_days)
-            / float(period_number_days)
-            * first_to_depreciate_dl.amount,
-        )
-        residual_value = asset.value_residual - to_depreciate_amount
-        if to_depreciate_amount:
-            update_vals = {
-                "amount": to_depreciate_amount,
-                "line_date": new_line_date,
-                "line_days": to_depreciate_days,
-            }
-            first_to_depreciate_dl.write(update_vals)
-            dlines[0].create_move()
-            dlines -= dlines[0]
-        dlines.unlink()
+        asset._depreciate_until(self.date_remove)
+        residual_value = asset.value_residual
+        asset._get_pending_depreciation_lines().unlink()
         return residual_value
 
     def _get_removal_data(self, asset, residual_value):

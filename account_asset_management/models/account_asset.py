@@ -645,6 +645,73 @@ class AccountAsset(models.Model):
             order="line_date desc",
         )
 
+    def _get_pending_depreciation_lines(self):
+        """Depreciation lines not accounted for yet. Oldest first."""
+        self.ensure_one()
+        lines = self.depreciation_line_ids.filtered(
+            lambda line: line.type == "depreciate"
+            and not line.init_entry
+            and not line.move_check
+        )
+        return lines.sorted(key=lambda line: line.line_date)
+
+    def _get_prorata_depreciation(self, until_date):
+        """Return the first pending depreciation line, with the amount and
+        number of days to depreciate from the last depreciation until the day
+        before until_date."""
+        self.ensure_one()
+        first_dl = self._get_pending_depreciation_lines()[:1]
+        if not first_dl:
+            return first_dl, 0.0, 0
+        if first_dl.previous_id:
+            last_depr_date = first_dl.previous_id.line_date
+        else:
+            create_dl = self.depreciation_line_ids.filtered(
+                lambda line: line.type == "create"
+            )
+            last_depr_date = create_dl.line_date
+        same_month = last_depr_date.month == first_dl.line_date.month and 1 or 0
+        period_number_days = (first_dl.line_date - last_depr_date).days + same_month
+        new_line_date = until_date + relativedelta(days=-1)
+        to_depreciate_days = (new_line_date - last_depr_date).days + same_month
+        if to_depreciate_days <= 0:
+            return first_dl, 0.0, 0
+        amount = self.company_id.currency_id.round(
+            float(to_depreciate_days) / float(period_number_days) * first_dl.amount
+        )
+        return first_dl, amount, to_depreciate_days
+
+    def _depreciate_until(self, until_date):
+        """Post the depreciation from the last depreciation until the day
+        before until_date. The rest of the period stays as a pending line."""
+        self.ensure_one()
+        line, amount, days = self._get_prorata_depreciation(until_date)
+        if not amount:
+            return
+        next_line = self._get_pending_depreciation_lines()[1:2]
+        remaining_amount = line.amount - amount
+        remaining_vals = {
+            "asset_id": self.id,
+            "name": line.name,
+            "amount": remaining_amount,
+            "line_date": line.line_date,
+            "line_days": line.line_days - days,
+            "type": "depreciate",
+        }
+        line.write(
+            {
+                "amount": amount,
+                "line_date": until_date + relativedelta(days=-1),
+                "line_days": days,
+            }
+        )
+        if not self.currency_id.is_zero(remaining_amount):
+            remaining_line = self.env["account.asset.line"].create(
+                dict(remaining_vals, previous_id=line.id)
+            )
+            next_line.previous_id = remaining_line
+        line.create_move()
+
     def compute_depreciation_board(self):
         line_obj = self.env["account.asset.line"]
 

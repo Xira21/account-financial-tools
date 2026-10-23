@@ -21,6 +21,8 @@
                         <field name="new_value" />
                     </group>
                     <group string="Summary">
+                        <field name="purchase_value" />
+                        <field name="depreciated_value" />
                         <field name="current_value" />
                         <field name="value_difference" />
                         <field
@@ -31,6 +33,9 @@
                         />
                     </group>
                 </group>
+                <div class="text-muted" invisible="not info_message">
+                    <field name="info_message" nolabel="1" />
+                </div>
                 <footer>
                     <button
                         string="Modify"
