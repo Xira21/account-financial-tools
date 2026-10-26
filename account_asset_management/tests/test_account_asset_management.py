@@ -1140,3 +1140,110 @@ class TestAssetManagement(AccountTestInvoicingCommon):
             lambda line: line.type == "remove"
         )
         self.assertAlmostEqual(removal_line.amount, 800.0, places=2)
+
+    def _create_monthly_asset_with_posted_lines(self, posted_months):
+        asset = self.asset_model.create(
+            {
+                "name": "test asset",
+                "profile_id": self.ict3Y.id,
+                "purchase_value": 1200,
+                "date_start": "2025-01-01",
+                "method_time": "number",
+                "method_number": 12,
+                "method_period": "month",
+            }
+        )
+        asset.validate()
+        asset._get_pending_depreciation_lines()[:posted_months].create_move()
+        return asset
+
+    def _modify_asset_value(self, asset, change_date, new_value):
+        wiz = (
+            self.env["account.asset.modify"]
+            .with_context(active_id=asset.id)
+            .create({"reason": "Test", "date": change_date, "new_value": new_value})
+        )
+        wiz.modify()
+        asset.invalidate_recordset()
+
+    def _assert_pending_amounts(self, asset, amounts):
+        pending_lines = asset._get_pending_depreciation_lines()
+        for line, amount in zip(pending_lines, amounts, strict=True):
+            self.assertAlmostEqual(line.amount, amount, places=2)
+
+    def test_24_decrease_value(self):
+        """Decrease the value of a running asset: separate entry for the
+        decrease and the new value spread over all the pending lines, also
+        after recomputing the depreciation board."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._modify_asset_value(asset, "2025-06-03", 620)
+        prorata_line = asset.depreciation_line_ids.filtered(
+            lambda line: line.line_date == date(2025, 6, 2)
+        )
+        decrease_line = asset.depreciation_line_ids.filtered("value_decrease")
+        self.assertAlmostEqual(prorata_line.amount, 6.67, places=2)
+        self.assertTrue(prorata_line.move_check)
+        self.assertEqual(decrease_line.line_date, date(2025, 6, 3))
+        self.assertAlmostEqual(decrease_line.amount, 73.33, places=2)
+        self.assertTrue(decrease_line.move_id)
+        self.assertNotEqual(decrease_line.move_id, prorata_line.move_id)
+        expense_line = decrease_line.move_id.line_ids.filtered(
+            lambda line: line.account_id
+            == self.ict3Y.account_expense_depreciation_id
+        )
+        self.assertAlmostEqual(expense_line.debit, 73.33, places=2)
+        self.assertAlmostEqual(asset.value_residual, 620, places=2)
+        expected = [83.46] + [89.42] * 5 + [89.44]
+        self._assert_pending_amounts(asset, expected)
+        asset.compute_depreciation_board()
+        asset.invalidate_recordset()
+        self._assert_pending_amounts(asset, expected)
+        asset._get_pending_depreciation_lines()[:2].create_move()
+        asset.compute_depreciation_board()
+        asset.invalidate_recordset()
+        self._assert_pending_amounts(asset, expected[2:])
+
+    def test_25_decrease_value_to_zero(self):
+        """Decreasing the value to zero closes the asset."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._modify_asset_value(asset, "2025-06-03", 0)
+        self.assertEqual(asset.state, "close")
+        self.assertAlmostEqual(asset.value_residual, 0, places=2)
+        self.assertFalse(asset._get_pending_depreciation_lines())
+
+    def test_26_two_decreases_in_the_same_period(self):
+        """A second change in the same period does not depreciate again the
+        days already depreciated."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._modify_asset_value(asset, "2025-06-03", 620)
+        self._modify_asset_value(asset, "2025-06-20", 500)
+        june_depreciation = sum(
+            asset.depreciation_line_ids.filtered(
+                lambda line: line.line_date.month == 6
+                and line.move_check
+                and not line.value_decrease
+            ).mapped("amount")
+        )
+        # 2 days at 100/month + 17 days of the 28 left at 83.46
+        self.assertAlmostEqual(june_depreciation, 6.67 + 50.67, places=2)
+        self.assertAlmostEqual(asset.value_residual, 500, places=2)
+        self.assertAlmostEqual(
+            sum(asset._get_pending_depreciation_lines().mapped("amount")),
+            500,
+            places=2,
+        )
+
+    def test_27_spread_residual_value_without_weights(self):
+        """When all the planned amounts are zero, the value is spread in equal
+        parts, so nothing is left without depreciating."""
+        asset = self._create_monthly_asset_with_posted_lines(0)
+        table = [
+            {
+                "lines": [
+                    {"date": date(2025, 1, 31), "days": 31, "amount": 0.0},
+                    {"date": date(2025, 2, 28), "days": 28, "amount": 0.0},
+                ]
+            }
+        ]
+        asset._spread_residual_value(table, 0, 0, False, 200)
+        self.assertEqual([line["amount"] for line in table[0]["lines"]], [500, 500])

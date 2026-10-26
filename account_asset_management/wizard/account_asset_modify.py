@@ -74,7 +74,7 @@ class AccountAssetModify(models.TransientModel):
         for wiz in self:
             wiz.new_value = wiz.current_value
 
-    @api.depends("date", "prorata_amount")
+    @api.depends("date", "prorata_amount", "modification_type", "value_difference")
     def _compute_info_message(self):
         for wiz in self:
             messages = []
@@ -88,6 +88,20 @@ class AccountAssetModify(models.TransientModel):
                             self.env, wiz.prorata_amount, currency_obj=wiz.currency_id
                         ),
                         date=format_date(self.env, wiz.date - relativedelta(days=1)),
+                    )
+                )
+            if wiz.modification_type == "decrease":
+                messages.append(
+                    self.env._(
+                        "A value decrease entry of %(amount)s will be posted on "
+                        "%(date)s, and the new value will be spread over all "
+                        "the pending depreciations.",
+                        amount=formatLang(
+                            self.env,
+                            -wiz.value_difference,
+                            currency_obj=wiz.currency_id,
+                        ),
+                        date=format_date(self.env, wiz.date),
                     )
                 )
             wiz.info_message = "\n".join(messages)
@@ -143,6 +157,11 @@ class AccountAssetModify(models.TransientModel):
     def modify(self):
         self.ensure_one()
         self._check_modify()
-        self.asset_id._depreciate_until(self.date)
-        # TODO: decrease or increase
+        asset = self.asset_id
+        modification_type = self.modification_type
+        difference = self.value_difference
+        asset._depreciate_until(self.date)
+        if modification_type == "decrease":
+            asset._decrease_value(-difference, self.date)
+        # TODO: increase
         return {"type": "ir.actions.act_window_close"}

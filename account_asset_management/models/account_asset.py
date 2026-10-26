@@ -663,11 +663,14 @@ class AccountAsset(models.Model):
         first_dl = self._get_pending_depreciation_lines()[:1]
         if not first_dl:
             return first_dl, 0.0, 0
+        previous_dl = first_dl.previous_id
+        while previous_dl.value_decrease:
+            previous_dl = previous_dl.previous_id
         # the day of the last depreciation is already depreciated: count an
         # extra day only when counting from the start date of the asset
         same_month = 0
-        if first_dl.previous_id:
-            last_depr_date = first_dl.previous_id.line_date
+        if previous_dl:
+            last_depr_date = previous_dl.line_date
         else:
             create_dl = self.depreciation_line_ids.filtered(
                 lambda line: line.type == "create"
@@ -715,6 +718,54 @@ class AccountAsset(models.Model):
             next_line.previous_id = remaining_line
         line.create_move()
 
+    def _decrease_value(self, amount, decrease_date):
+        """Post a depreciation entry for a decrease of the asset value and
+        spread the new value over the pending depreciation lines."""
+        self.ensure_one()
+        decrease_line = self.env["account.asset.line"].create(
+            {
+                "asset_id": self.id,
+                "previous_id": self._get_posted_depreciation_lines()[:1].id,
+                "name": self.env._("Value decrease"),
+                "amount": amount,
+                "line_date": decrease_date,
+                "type": "depreciate",
+                "value_decrease": True,
+            }
+        )
+        decrease_line.create_move()
+        if self.currency_id.is_zero(self.value_residual):
+            self._get_pending_depreciation_lines().unlink()
+        else:
+            self.compute_depreciation_board()
+        return decrease_line
+
+    def _spread_residual_value(
+        self, table, table_i_start, line_i_start, last_date, depreciated_value
+    ):
+        """Spread the value still to depreciate over the pending lines of the
+        table, in proportion to their planned amounts. A line whose period is
+        partly depreciated only weighs its remaining days."""
+        amount = self.depreciation_base - depreciated_value
+        if self.method in ["linear-limit", "degr-limit"]:
+            amount -= self.salvage_value
+        lines = []
+        for entry in table[table_i_start:]:
+            lines += entry["lines"][line_i_start:]
+            line_i_start = 0
+        if not lines:
+            return
+        weights = [line["amount"] for line in lines]
+        if last_date and lines[0]["days"]:
+            remaining_days = (lines[0]["date"] - last_date).days
+            weights[0] *= min(1.0, remaining_days / lines[0]["days"])
+        total_weight = sum(weights)
+        for line, weight in zip(lines, weights, strict=True):
+            if total_weight:
+                line["amount"] = amount * weight / total_weight
+            else:
+                line["amount"] = amount / len(lines)
+
     def compute_depreciation_board(self):
         line_obj = self.env["account.asset.line"]
 
@@ -723,6 +774,8 @@ class AccountAsset(models.Model):
             if currency.is_zero(asset.value_residual):
                 continue
             posted_lines = asset._get_posted_depreciation_lines()
+            decrease_lines = posted_lines.filtered("value_decrease")
+            depreciation_lines = posted_lines - decrease_lines
             if posted_lines:
                 last_line = posted_lines[0]
             else:
@@ -746,10 +799,12 @@ class AccountAsset(models.Model):
             # check table with posted entries and
             # recompute in case of deviation
             depreciated_value_posted = depreciated_value = 0.0
-            if posted_lines:
+            if depreciation_lines:
                 total_table_lines = sum(len(entry["lines"]) for entry in table)
-                move_check_lines = asset.depreciation_line_ids.filtered("move_check")
-                last_depreciation_date = last_line.line_date
+                move_check_lines = asset.depreciation_line_ids.filtered(
+                    lambda line: line.move_check and not line.value_decrease
+                )
+                last_depreciation_date = depreciation_lines[0].line_date
                 last_date_in_table = table[-1]["lines"][-1]["date"]
                 # If the number of lines in the table is the same as the depreciation
                 # lines, we will not show an error even if the dates are the same.
@@ -800,7 +855,7 @@ class AccountAsset(models.Model):
                 )
                 residual_amount = asset.depreciation_base - depreciated_value
                 amount_diff = currency.round(residual_amount_table - residual_amount)
-                if amount_diff:
+                if amount_diff and not decrease_lines:
                     # We will auto-create a new line because the number of lines in
                     # the tables are the same as the posted depreciations and there
                     # is still a residual value. Only in this case we will need to
@@ -820,6 +875,19 @@ class AccountAsset(models.Model):
             else:  # no posted lines
                 table_i_start = 0
                 line_i_start = 0
+                last_depreciation_date = False
+
+            if decrease_lines:
+                # assets with a value decrease keep the new value spread
+                # over all the pending lines
+                depreciated_value_posted = sum(posted_lines.mapped("amount"))
+                asset._spread_residual_value(
+                    table,
+                    table_i_start,
+                    line_i_start,
+                    last_depreciation_date,
+                    depreciated_value_posted,
+                )
 
             asset._compute_depreciation_line(
                 depreciated_value_posted,
