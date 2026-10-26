@@ -1198,6 +1198,8 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         asset.compute_depreciation_board()
         asset.invalidate_recordset()
         self._assert_pending_amounts(asset, expected)
+        # the rest of June: from the 3rd to the 30th
+        self.assertEqual(asset._get_pending_depreciation_lines()[0].line_days, 28)
         asset._get_pending_depreciation_lines()[:2].create_move()
         asset.compute_depreciation_board()
         asset.invalidate_recordset()
@@ -1311,6 +1313,7 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         self.assertEqual(asset.child_count, 1)
         self.assertAlmostEqual(asset.gross_increase_value, 106.67, places=2)
         self.assertAlmostEqual(asset.total_book_value, 800, places=2)
+        self.assertEqual(child.action_view_parent()["res_id"], asset.id)
 
     def test_29_parent_duration_change_moves_child_end_date(self):
         """When the duration of the parent changes, its value increases end with

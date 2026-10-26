@@ -594,6 +594,16 @@ class AccountAsset(models.Model):
             "domain": [("id", "in", self.account_move_line_ids.mapped("move_id").ids)],
         }
 
+    def action_view_parent(self):
+        self.ensure_one()
+        return {
+            "name": self.env._("Parent Asset"),
+            "view_mode": "form",
+            "res_model": "account.asset",
+            "res_id": self.parent_id.id,
+            "type": "ir.actions.act_window",
+        }
+
     def action_view_children(self):
         self.ensure_one()
         return {
@@ -898,7 +908,9 @@ class AccountAsset(models.Model):
         weights = [line["amount"] for line in lines]
         if last_date and lines[0]["days"]:
             remaining_days = (lines[0]["date"] - last_date).days
-            weights[0] *= min(1.0, remaining_days / lines[0]["days"])
+            if remaining_days < lines[0]["days"]:
+                weights[0] *= remaining_days / lines[0]["days"]
+                lines[0]["days"] = remaining_days
         total_weight = sum(weights)
         for line, weight in zip(lines, weights, strict=True):
             if total_weight:

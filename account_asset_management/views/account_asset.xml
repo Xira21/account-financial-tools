@@ -58,6 +58,17 @@
                             icon="fa-bars"
                         />
                         <button
+                            name="action_view_parent"
+                            type="object"
+                            class="oe_stat_button"
+                            icon="fa-level-up"
+                            invisible="not parent_id"
+                        >
+                            <div class="o_stat_info">
+                                <span class="o_stat_text">Parent Asset</span>
+                            </div>
+                        </button>
+                        <button
                             name="action_view_children"
                             type="object"
                             class="oe_stat_button"
@@ -224,9 +235,16 @@
                             >
                                 <list
                                     decoration-info="(move_check == False) and (init_entry == False)"
+                                    decoration-warning="value_decrease"
                                     create="false"
                                 >
                                     <field name="type" />
+                                    <field name="value_decrease" column_invisible="1" />
+                                    <field
+                                        name="name"
+                                        string="Description"
+                                        invisible="not value_decrease"
+                                    />
                                     <field name="line_date" />
                                     <field name="line_days" sum="Total Days" />
                                     <field name="depreciated_value" readonly="1" />
