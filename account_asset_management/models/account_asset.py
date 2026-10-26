@@ -771,6 +771,13 @@ class AccountAsset(models.Model):
             next_line.previous_id = remaining_line
         line.create_move()
 
+    def _get_value_decrease_accounts(self):
+        """Return the accounts of the entry of a value decrease: the account
+        credited (accumulated value loss) and the account debited (expense)."""
+        self.ensure_one()
+        profile = self.profile_id
+        return profile.account_depreciation_id, profile.account_expense_depreciation_id
+
     def _decrease_value(self, amount, decrease_date):
         """Post a depreciation entry for a decrease of the asset value and
         spread the new value over the pending depreciation lines."""

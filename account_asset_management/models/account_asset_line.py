@@ -275,8 +275,11 @@ class AccountAssetLine(models.Model):
             depreciation_date = line.line_date
             am_vals = line._setup_move_data(depreciation_date)
             move = self.env["account.move"].with_context(**ctx).create(am_vals)
-            depr_acc = asset.profile_id.account_depreciation_id
-            exp_acc = asset.profile_id.account_expense_depreciation_id
+            if line.value_decrease:
+                depr_acc, exp_acc = asset._get_value_decrease_accounts()
+            else:
+                depr_acc = asset.profile_id.account_depreciation_id
+                exp_acc = asset.profile_id.account_expense_depreciation_id
             aml_d_vals = line._setup_move_line_data(
                 depreciation_date, depr_acc, "depreciation", move
             )
