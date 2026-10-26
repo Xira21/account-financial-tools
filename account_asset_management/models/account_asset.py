@@ -783,6 +783,10 @@ class AccountAsset(models.Model):
                         date_min = line["date"]
                     if line["date"] == last_depreciation_date:
                         _line_i += 1
+                    else:
+                        # the last posting is in the middle of this line:
+                        # compare with the residual value before this line
+                        residual_amount_table += line["amount"]
                 table_i_start = _table_i
                 line_i_start = _line_i
 

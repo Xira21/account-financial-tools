@@ -1060,3 +1060,43 @@ class TestAssetManagement(AccountTestInvoicingCommon):
             }
         )
         self.assertEqual(asset.salvage_value, 5)
+
+    def test_22_recompute_with_posting_in_the_middle_of_a_period(self):
+        """Recompute when the last posted depreciation falls in the middle of
+        a period of the new table: no period may be lost."""
+        asset = self.asset_model.create(
+            {
+                "name": "test asset",
+                "profile_id": self.ict3Y.id,
+                "purchase_value": 1200,
+                "date_start": "2025-01-01",
+                "method_time": "year",
+                "method_number": 3,
+                "method_period": "month",
+            }
+        )
+        asset.validate()
+        depreciation_lines = asset.depreciation_line_ids.filtered(
+            lambda line: line.type == "depreciate"
+        )
+        depreciation_lines[0].create_move()
+        asset.set_to_draft()
+        asset.method_period = "year"
+        asset.compute_depreciation_board()
+        asset.invalidate_recordset()
+        depreciation_lines = asset.depreciation_line_ids.filtered(
+            lambda line: line.type == "depreciate"
+        )
+        self.assertEqual(
+            depreciation_lines.mapped("line_date"),
+            [
+                date(2025, 1, 31),
+                date(2025, 12, 31),
+                date(2026, 12, 31),
+                date(2027, 12, 31),
+            ],
+        )
+        for line, amount in zip(
+            depreciation_lines, [33.33, 366.67, 400.0, 400.0], strict=True
+        ):
+            self.assertAlmostEqual(line.amount, amount, places=2)
