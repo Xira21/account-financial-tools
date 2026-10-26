@@ -1100,3 +1100,43 @@ class TestAssetManagement(AccountTestInvoicingCommon):
             depreciation_lines, [33.33, 366.67, 400.0, 400.0], strict=True
         ):
             self.assertAlmostEqual(line.amount, amount, places=2)
+
+    def test_23_early_removal_day_after_last_posted_depreciation(self):
+        """An early removal on the day after the last posted depreciation must
+        not depreciate that day again."""
+        asset = self.asset_model.create(
+            {
+                "name": "test asset",
+                "profile_id": self.ict3Y.id,
+                "purchase_value": 1200,
+                "date_start": "2025-01-01",
+            }
+        )
+        asset.validate()
+        depreciation_lines = asset.depreciation_line_ids.filtered(
+            lambda line: line.type == "depreciate"
+        )
+        depreciation_lines[0].create_move()
+        wiz = self.remove_model.with_context(
+            active_id=asset.id, early_removal=True
+        ).create(
+            {
+                "date_remove": "2026-01-01",
+                "sale_value": 0.0,
+                "posting_regime": "gain_loss_on_sale",
+                "account_plus_value_id": self.company_data[
+                    "default_account_revenue"
+                ].id,
+                "account_min_value_id": self.company_data["default_account_expense"].id,
+            }
+        )
+        wiz.remove()
+        asset.invalidate_recordset()
+        depreciation_lines = asset.depreciation_line_ids.filtered(
+            lambda line: line.type == "depreciate"
+        )
+        self.assertEqual(depreciation_lines.mapped("amount"), [400.0])
+        removal_line = asset.depreciation_line_ids.filtered(
+            lambda line: line.type == "remove"
+        )
+        self.assertAlmostEqual(removal_line.amount, 800.0, places=2)

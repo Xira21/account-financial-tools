@@ -663,6 +663,9 @@ class AccountAsset(models.Model):
         first_dl = self._get_pending_depreciation_lines()[:1]
         if not first_dl:
             return first_dl, 0.0, 0
+        # the day of the last depreciation is already depreciated: count an
+        # extra day only when counting from the start date of the asset
+        same_month = 0
         if first_dl.previous_id:
             last_depr_date = first_dl.previous_id.line_date
         else:
@@ -670,7 +673,7 @@ class AccountAsset(models.Model):
                 lambda line: line.type == "create"
             )
             last_depr_date = create_dl.line_date
-        same_month = last_depr_date.month == first_dl.line_date.month and 1 or 0
+            same_month = last_depr_date.month == first_dl.line_date.month and 1 or 0
         period_number_days = (first_dl.line_date - last_depr_date).days + same_month
         new_line_date = until_date + relativedelta(days=-1)
         to_depreciate_days = (new_line_date - last_depr_date).days + same_month
