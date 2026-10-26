@@ -1352,3 +1352,118 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         self.assertTrue(child.depreciation_line_ids.filtered("value_decrease"))
         self.assertFalse(asset.depreciation_line_ids.filtered("value_decrease"))
         self._assert_pending_amounts(asset, [93.33] + [100.0] * 6)
+
+    def _create_asset_with_posted_lines(
+        self, method, salvage_value=0.0, method_time="year", posted=1
+    ):
+        asset = self.asset_model.create(
+            {
+                "name": "test asset",
+                "profile_id": self.ict3Y.id,
+                "purchase_value": 10000,
+                "salvage_value": salvage_value,
+                "date_start": "2025-01-01",
+                "method": method,
+                "method_progress_factor": 0.3,
+                "method_time": method_time,
+                "method_number": 5,
+                "method_period": "year",
+            }
+        )
+        asset.validate()
+        asset._get_pending_depreciation_lines()[:posted].create_move()
+        return asset
+
+    def _check_decrease_keeps_plan_shape(self, asset):
+        change_date = date(2026, 7, 1)
+        prorata_amount = asset._get_prorata_depreciation(change_date)[1]
+        planned = asset._get_pending_depreciation_lines().mapped("amount")
+        planned[0] -= prorata_amount
+        current_value = asset.purchase_value - asset.value_depreciated - prorata_amount
+        self._modify_asset_value(asset, change_date, current_value - 1000)
+        decrease_line = asset.depreciation_line_ids.filtered("value_decrease")
+        self.assertEqual(decrease_line.line_date, change_date)
+        self.assertAlmostEqual(decrease_line.amount, 1000, places=2)
+        self.assertTrue(decrease_line.move_id)
+        pending = asset._get_pending_depreciation_lines().mapped("amount")
+        self.assertAlmostEqual(sum(pending), asset.value_residual, places=2)
+        factor = sum(pending) / sum(planned)
+        for planned_amount, amount in zip(planned[:-1], pending[:-1], strict=True):
+            self.assertAlmostEqual(amount, planned_amount * factor, delta=0.01)
+        asset.compute_depreciation_board()
+        asset.invalidate_recordset()
+        self.assertEqual(
+            asset._get_pending_depreciation_lines().mapped("amount"), pending
+        )
+        asset._get_pending_depreciation_lines()[:1].create_move()
+        asset.compute_depreciation_board()
+        asset.invalidate_recordset()
+        self.assertEqual(
+            asset._get_pending_depreciation_lines().mapped("amount"), pending[1:]
+        )
+
+    def _check_increase_child_plan(self, asset):
+        change_date = date(2026, 7, 1)
+        prorata_amount = asset._get_prorata_depreciation(change_date)[1]
+        planned = asset._get_pending_depreciation_lines().mapped("amount")
+        planned[0] -= prorata_amount
+        current_value = asset.purchase_value - asset.value_depreciated - prorata_amount
+        self._increase_asset_value(asset, change_date, current_value + 2000)
+        self._assert_pending_amounts(asset, planned)
+        child = asset.child_ids
+        self.assertEqual(child.method, asset.method)
+        self.assertEqual(child.method_progress_factor, asset.method_progress_factor)
+        self.assertEqual(child.method_time, "year")
+        self.assertEqual(child.salvage_value, 0)
+        self.assertEqual(
+            child._get_depreciation_end_date(), asset._get_depreciation_end_date()
+        )
+        self.assertAlmostEqual(
+            sum(child._get_pending_depreciation_lines().mapped("amount")),
+            2000,
+            places=2,
+        )
+        return child
+
+    def test_32_decrease_value_degressive_linear(self):
+        """A decrease of a degressive-linear asset keeps the shape of its plan,
+        also after recomputing the depreciation board."""
+        asset = self._create_asset_with_posted_lines("degr-linear")
+        self._check_decrease_keeps_plan_shape(asset)
+
+    def test_33_decrease_value_degressive(self):
+        """A decrease of a degressive asset keeps the shape of its plan, also
+        the remaining value of the last period."""
+        asset = self._create_asset_with_posted_lines("degressive")
+        self._check_decrease_keeps_plan_shape(asset)
+
+    def test_34_increase_value_degressive_linear(self):
+        """The value increase of a degressive-linear asset is depreciated with
+        the same method and degressive factor until the end of the asset."""
+        asset = self._create_asset_with_posted_lines("degr-linear")
+        self._check_increase_child_plan(asset)
+
+    def test_35_increase_value_degressive_number_of_depreciations(self):
+        """The value increase of an asset with a number of depreciations ends
+        on the end date of the asset."""
+        asset = self._create_asset_with_posted_lines(
+            "degressive", method_time="number"
+        )
+        child = self._check_increase_child_plan(asset)
+        self.assertEqual(child.method_end, asset._get_depreciation_end_date())
+
+    def test_36_modify_value_degressive_limit(self):
+        """Degressive up to salvage value: the value cannot go below the salvage
+        value, a decrease keeps it and the increase has no salvage value."""
+        asset = self._create_asset_with_posted_lines("degr-limit", salvage_value=1000)
+        with self.assertRaisesRegex(UserError, "salvage value"):
+            self._modify_asset_value(asset, "2026-07-01", 900)
+        self._modify_asset_value(asset, "2026-07-01", 3000)
+        self.assertAlmostEqual(asset.value_residual, 3000, places=2)
+        self.assertAlmostEqual(
+            sum(asset._get_pending_depreciation_lines().mapped("amount")),
+            2000,
+            places=2,
+        )
+        asset = self._create_asset_with_posted_lines("degr-limit", salvage_value=1000)
+        self._check_increase_child_plan(asset)
