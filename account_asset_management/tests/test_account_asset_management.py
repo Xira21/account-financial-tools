@@ -1247,3 +1247,108 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         ]
         asset._spread_residual_value(table, 0, 0, False, 200)
         self.assertEqual([line["amount"] for line in table[0]["lines"]], [500, 500])
+
+    def _increase_asset_value(self, asset, change_date, new_value):
+        counterpart = self.env["account.account"].search(
+            [("code", "=", "523900"), ("company_ids", "in", asset.company_id.ids)]
+        ) or self.env["account.account"].create(
+            {
+                "code": "523900",
+                "name": "Fixed asset suppliers",
+                "account_type": "liability_current",
+            }
+        )
+        wiz = (
+            self.env["account.asset.modify"]
+            .with_context(active_id=asset.id)
+            .create(
+                {
+                    "reason": "Test",
+                    "date": change_date,
+                    "new_value": new_value,
+                    "account_counterpart_id": counterpart.id,
+                }
+            )
+        )
+        wiz.modify()
+        asset.invalidate_recordset()
+        return counterpart
+
+    def test_28_increase_value(self):
+        """Increase the value of a running asset: the asset keeps its plan and a
+        child asset is created for the increase, with its acquisition entry."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        assets_before = self.asset_model.search([])
+        counterpart = self._increase_asset_value(asset, "2025-06-03", 800)
+        self.assertEqual(self.asset_model.search([]) - assets_before, asset.child_ids)
+        self._assert_pending_amounts(asset, [93.33] + [100.0] * 6)
+        child = asset.child_ids
+        self.assertEqual(child.state, "open")
+        self.assertAlmostEqual(child.purchase_value, 106.67, places=2)
+        self.assertEqual(child.date_start, date(2025, 6, 3))
+        self.assertEqual(child.method, asset.method)
+        self.assertEqual(child.method_time, "year")
+        self.assertEqual(child.method_end, date(2025, 12, 31))
+        self.assertEqual(child._get_depreciation_end_date(), date(2025, 12, 31))
+        self.assertAlmostEqual(
+            sum(child._get_pending_depreciation_lines().mapped("amount")),
+            106.67,
+            places=2,
+        )
+        create_line = child.depreciation_line_ids.filtered(
+            lambda line: line.type == "create"
+        )
+        self.assertEqual(create_line.move_id.state, "posted")
+        asset_line = create_line.move_id.line_ids.filtered(
+            lambda line: line.account_id == self.ict3Y.account_asset_id
+        )
+        counterpart_line = create_line.move_id.line_ids.filtered(
+            lambda line: line.account_id == counterpart
+        )
+        self.assertAlmostEqual(asset_line.debit, 106.67, places=2)
+        self.assertEqual(asset_line.asset_id, child)
+        self.assertAlmostEqual(counterpart_line.credit, 106.67, places=2)
+        self.assertEqual(asset.child_count, 1)
+        self.assertAlmostEqual(asset.gross_increase_value, 106.67, places=2)
+        self.assertAlmostEqual(asset.total_book_value, 800, places=2)
+
+    def test_29_parent_duration_change_moves_child_end_date(self):
+        """When the duration of the parent changes, its value increases end with
+        it, without changing their posted depreciations."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        child_posted_line = child._get_pending_depreciation_lines()[:1]
+        child_posted_line.create_move()
+        posted_amount = child_posted_line.amount
+        asset.set_to_draft()
+        asset.method_number = 18
+        asset.compute_depreciation_board()
+        child.invalidate_recordset()
+        self.assertEqual(asset._get_depreciation_end_date(), date(2026, 6, 30))
+        self.assertEqual(child.method_end, date(2026, 6, 30))
+        self.assertEqual(child._get_depreciation_end_date(), date(2026, 6, 30))
+        self.assertTrue(child_posted_line.move_check)
+        self.assertEqual(child_posted_line.amount, posted_amount)
+        self.assertAlmostEqual(child.value_residual, 106.67 - posted_amount, places=2)
+
+    def test_30_increase_value_of_a_child(self):
+        """An increase can only be made from the parent asset."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        child._get_pending_depreciation_lines()[:1].create_move()
+        with self.assertRaisesRegex(UserError, "Make the increase from the parent"):
+            self._increase_asset_value(child, "2025-07-01", 200)
+
+    def test_31_decrease_value_of_a_child(self):
+        """A decrease of a child asset only changes the child."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        child._get_pending_depreciation_lines()[:1].create_move()
+        self._modify_asset_value(child, "2025-07-01", 50)
+        self.assertAlmostEqual(child.value_residual, 50, places=2)
+        self.assertTrue(child.depreciation_line_ids.filtered("value_decrease"))
+        self.assertFalse(asset.depreciation_line_ids.filtered("value_decrease"))
+        self._assert_pending_amounts(asset, [93.33] + [100.0] * 6)

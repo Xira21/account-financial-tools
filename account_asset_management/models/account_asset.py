@@ -11,8 +11,9 @@ from traceback import format_exception
 
 from dateutil.relativedelta import relativedelta
 
-from odoo import api, fields, models
+from odoo import Command, api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools.misc import format_date
 
 _logger = logging.getLogger(__name__)
 
@@ -253,10 +254,51 @@ class AccountAsset(models.Model):
         carried forward to the first depreciation line of the current open
         period.""",
     )
+    parent_id = fields.Many2one(
+        comodel_name="account.asset",
+        string="Parent Asset",
+        readonly=True,
+        ondelete="restrict",
+        check_company=True,
+        index="btree_not_null",
+        help="Asset whose value increase created this asset.",
+    )
+    child_ids = fields.One2many(
+        comodel_name="account.asset",
+        inverse_name="parent_id",
+        string="Value Increases",
+        readonly=True,
+    )
+    child_count = fields.Integer(compute="_compute_child_values")
+    gross_increase_value = fields.Monetary(
+        string="Gross Increase",
+        compute="_compute_child_values",
+        help="Purchase value of the assets created by value increases.",
+    )
+    total_book_value = fields.Monetary(
+        compute="_compute_child_values",
+        help="Net book value of this asset and of the assets created by its "
+        "value increases.",
+    )
 
     @api.model
     def _default_company_id(self):
         return self.env.company
+
+    @api.depends(
+        "purchase_value",
+        "value_depreciated",
+        "child_ids.purchase_value",
+        "child_ids.value_depreciated",
+    )
+    def _compute_child_values(self):
+        for asset in self:
+            assets = asset | asset.child_ids
+            asset.child_count = len(asset.child_ids)
+            asset.gross_increase_value = sum(asset.child_ids.mapped("purchase_value"))
+            asset.total_book_value = sum(assets.mapped("purchase_value")) - sum(
+                assets.mapped("value_depreciated")
+            )
 
     @api.depends("depreciation_line_ids.move_id")
     def _compute_move_line_check(self):
@@ -552,6 +594,17 @@ class AccountAsset(models.Model):
             "domain": [("id", "in", self.account_move_line_ids.mapped("move_id").ids)],
         }
 
+    def action_view_children(self):
+        self.ensure_one()
+        return {
+            "name": self.env._("Value Increases"),
+            "view_mode": "list,form",
+            "res_model": "account.asset",
+            "type": "ir.actions.act_window",
+            "domain": [("parent_id", "=", self.id)],
+            "context": {"create": False},
+        }
+
     def _group_lines(self, table):
         """group lines prior to depreciation start period."""
 
@@ -740,6 +793,86 @@ class AccountAsset(models.Model):
             self.compute_depreciation_board()
         return decrease_line
 
+    def _get_depreciation_end_date(self):
+        self.ensure_one()
+        lines = self.depreciation_line_ids.filtered(
+            lambda line: line.type == "depreciate"
+        )
+        return max(lines.mapped("line_date"), default=False)
+
+    def _increase_value(self, amount, increase_date, counterpart_account):
+        """Create a child asset for an increase of the asset value, depreciated
+        with the same method until the end date of this asset, and post its
+        acquisition entry against the counterpart account."""
+        self.ensure_one()
+        child = self.create(
+            {
+                "parent_id": self.id,
+                "name": self.env._(
+                    "%(name)s (increase %(date)s)",
+                    name=self.name,
+                    date=format_date(self.env, increase_date),
+                ),
+                "code": self.code,
+                "company_id": self.company_id.id,
+                "profile_id": self.profile_id.id,
+                "group_ids": [Command.set(self.group_ids.ids)],
+                "partner_id": self.partner_id.id,
+                "analytic_distribution": self.analytic_distribution,
+                "purchase_value": amount,
+                "salvage_value": 0.0,
+                "date_start": increase_date,
+                "method": self.method,
+                "method_progress_factor": self.method_progress_factor,
+                "method_period": self.method_period,
+                "method_time": "year",
+                "method_end": self._get_depreciation_end_date(),
+                "prorata": True,
+                "days_calc": self.days_calc,
+                "use_leap_years": self.use_leap_years,
+            }
+        )
+        profile = self.profile_id
+        move = (
+            self.env["account.move"]
+            .with_context(allow_asset=True)
+            .create(
+                {
+                    "date": increase_date,
+                    "ref": child.name,
+                    "journal_id": profile.journal_id.id,
+                    "line_ids": [
+                        Command.create(
+                            {
+                                "name": child.name,
+                                "account_id": profile.account_asset_id.id,
+                                "debit": amount,
+                                "credit": 0.0,
+                                "partner_id": child.partner_id.id,
+                                "asset_id": child.id,
+                            }
+                        ),
+                        Command.create(
+                            {
+                                "name": child.name,
+                                "account_id": counterpart_account.id,
+                                "debit": 0.0,
+                                "credit": amount,
+                                "partner_id": child.partner_id.id,
+                                "asset_profile_id": False,
+                            }
+                        ),
+                    ],
+                }
+            )
+        )
+        move.action_post()
+        child.depreciation_line_ids.filtered(
+            lambda line: line.type == "create"
+        ).move_id = move
+        child.validate()
+        return child
+
     def _spread_residual_value(
         self, table, table_i_start, line_i_start, last_date, depreciated_value
     ):
@@ -897,6 +1030,16 @@ class AccountAsset(models.Model):
                 last_line,
                 posted_lines,
             )
+        for asset in self:
+            # the value increases end with the asset that they increase
+            end_date = asset._get_depreciation_end_date()
+            children = asset.child_ids.filtered(
+                lambda child, end_date=end_date: child.state == "open"
+                and child.method_end != end_date
+            )
+            if end_date and children:
+                children.write({"method_end": end_date})
+                children.compute_depreciation_board()
         return True
 
     def _get_fy_duration(self, fy, option="days"):

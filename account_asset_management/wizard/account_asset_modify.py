@@ -55,6 +55,13 @@ class AccountAssetModify(models.TransientModel):
         string="Type",
         compute="_compute_value_difference",
     )
+    account_counterpart_id = fields.Many2one(
+        comodel_name="account.account",
+        string="Counterpart Account",
+        check_company=True,
+        help="Account credited in the entry of the asset created by a value "
+        "increase.",
+    )
     info_message = fields.Text(compute="_compute_info_message")
 
     @api.depends("asset_id", "date")
@@ -102,6 +109,35 @@ class AccountAssetModify(models.TransientModel):
                             currency_obj=wiz.currency_id,
                         ),
                         date=format_date(self.env, wiz.date),
+                    )
+                )
+            elif wiz.modification_type == "increase":
+                messages.append(
+                    self.env._(
+                        "A new asset of %(amount)s will be created, depreciated "
+                        "from %(date)s until %(end_date)s, with an entry on the "
+                        "asset account against the counterpart account.",
+                        amount=formatLang(
+                            self.env,
+                            wiz.value_difference,
+                            currency_obj=wiz.currency_id,
+                        ),
+                        date=format_date(self.env, wiz.date),
+                        end_date=format_date(
+                            self.env, wiz.asset_id._get_depreciation_end_date()
+                        ),
+                    )
+                )
+            if wiz.asset_id.child_ids:
+                messages.append(
+                    self.env._(
+                        "This asset has value increases, with a total book value "
+                        "of %(amount)s. The change only affects this asset.",
+                        amount=formatLang(
+                            self.env,
+                            wiz.asset_id.total_book_value,
+                            currency_obj=wiz.currency_id,
+                        ),
                     )
                 )
             wiz.info_message = "\n".join(messages)
@@ -153,6 +189,18 @@ class AccountAssetModify(models.TransientModel):
                     pending_lines[0].line_date,
                 )
             )
+        if self.modification_type == "increase":
+            if asset.parent_id:
+                raise UserError(
+                    self.env._(
+                        "Make the increase from the parent asset (%s).",
+                        asset.parent_id.display_name,
+                    )
+                )
+            if not self.account_counterpart_id:
+                raise UserError(
+                    self.env._("A counterpart account is required for an increase.")
+                )
 
     def modify(self):
         self.ensure_one()
@@ -163,5 +211,6 @@ class AccountAssetModify(models.TransientModel):
         asset._depreciate_until(self.date)
         if modification_type == "decrease":
             asset._decrease_value(-difference, self.date)
-        # TODO: increase
+        else:
+            asset._increase_value(difference, self.date, self.account_counterpart_id)
         return {"type": "ir.actions.act_window_close"}

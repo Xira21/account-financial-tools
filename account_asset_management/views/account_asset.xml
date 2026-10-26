@@ -57,6 +57,19 @@
                             class="oe_stat_button"
                             icon="fa-bars"
                         />
+                        <button
+                            name="action_view_children"
+                            type="object"
+                            class="oe_stat_button"
+                            icon="fa-plus-square"
+                            invisible="not child_count"
+                        >
+                            <field
+                                name="child_count"
+                                string="Increases"
+                                widget="statinfo"
+                            />
+                        </button>
                     </div>
                     <div class="oe_title">
                         <label for="name" class="oe_edit_only" />
@@ -105,6 +118,7 @@
                                         name="date_start"
                                         readonly="state != 'draft'"
                                     />
+                                    <field name="parent_id" invisible="not parent_id" />
                                 </group>
                                 <group>
                                     <field
@@ -112,6 +126,14 @@
                                         readonly="state != 'draft'"
                                     />
                                     <field name="date_remove" />
+                                    <field
+                                        name="gross_increase_value"
+                                        invisible="not child_count"
+                                    />
+                                    <field
+                                        name="total_book_value"
+                                        invisible="not child_count"
+                                    />
                                 </group>
                             </group>
                             <group string="Other Information">
