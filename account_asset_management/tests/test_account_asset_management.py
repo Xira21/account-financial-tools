@@ -1355,6 +1355,8 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         self.assertTrue(child.depreciation_line_ids.filtered("value_decrease"))
         self.assertFalse(asset.depreciation_line_ids.filtered("value_decrease"))
         self._assert_pending_amounts(asset, [93.33] + [100.0] * 6)
+        asset.invalidate_recordset()
+        self.assertAlmostEqual(asset.total_book_value, 693.33 + 50, places=2)
 
     def _create_asset_with_posted_lines(
         self, method, salvage_value=0.0, method_time="year", posted=1
@@ -1470,3 +1472,76 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         )
         asset = self._create_asset_with_posted_lines("degr-limit", salvage_value=1000)
         self._check_increase_child_plan(asset)
+
+    def _remove_asset(self, asset, remove_date):
+        early_removal = not asset.currency_id.is_zero(asset.value_residual)
+        wiz = self.remove_model.with_context(
+            active_id=asset.id, early_removal=early_removal
+        ).create(
+            {
+                "date_remove": remove_date,
+                "sale_value": 0.0,
+                "posting_regime": "gain_loss_on_sale",
+                "account_plus_value_id": self.company_data[
+                    "default_account_revenue"
+                ].id,
+                "account_min_value_id": self.company_data["default_account_expense"].id,
+            }
+        )
+        wiz.remove()
+        asset.invalidate_recordset()
+
+    def test_37_remove_parent_with_running_child(self):
+        """A parent asset cannot be removed while a value increase is running."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        with self.assertRaisesRegex(UserError, "not removed: .*increase"):
+            asset.remove()
+        with self.assertRaisesRegex(UserError, "Remove them first"):
+            self._remove_asset(asset, "2025-06-10")
+        self.assertEqual(asset.state, "open")
+        self.assertEqual(child.state, "open")
+
+    def test_38_remove_parent_with_closed_child(self):
+        """A parent asset cannot be removed while a value increase is closed
+        but not removed."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        child._get_pending_depreciation_lines()[:1].create_move()
+        self._modify_asset_value(child, "2025-07-01", 0)
+        self.assertEqual(child.state, "close")
+        with self.assertRaisesRegex(UserError, "Remove them first"):
+            asset.remove()
+
+    def test_39_remove_child_then_parent(self):
+        """A value increase is removed alone with the removal wizard, and then
+        the parent can be removed."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        self._remove_asset(child, "2025-06-10")
+        self.assertEqual(child.state, "removed")
+        self.assertEqual(asset.state, "open")
+        self._assert_pending_amounts(asset, [93.33] + [100.0] * 6)
+        self.assertTrue(asset.remove())
+        asset._get_pending_depreciation_lines()[:1].create_move()
+        self._remove_asset(asset, "2025-07-10")
+        self.assertEqual(asset.state, "removed")
+
+    def test_40_decrease_parent_to_zero_with_running_child(self):
+        """A parent decreased to zero is closed while its value increase keeps
+        running, and it can only be removed after the value increase."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        self._modify_asset_value(asset, "2025-06-04", 0)
+        self.assertEqual(asset.state, "close")
+        self.assertEqual(child.state, "open")
+        self.assertAlmostEqual(child.value_residual, 106.67, places=2)
+        with self.assertRaisesRegex(UserError, "Remove them first"):
+            asset.remove()
+        self._remove_asset(child, "2025-06-10")
+        self._remove_asset(asset, "2025-06-10")
+        self.assertEqual(asset.state, "removed")

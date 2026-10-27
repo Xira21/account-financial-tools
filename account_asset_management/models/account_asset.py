@@ -543,8 +543,25 @@ class AccountAsset(models.Model):
                     asset.compute_depreciation_board()
         return True
 
+    def _check_value_increases_removed(self):
+        """An asset can only be removed after the assets created by its value
+        increases."""
+        self.ensure_one()
+        children = self.child_ids.filtered(
+            lambda child: child.state in ("open", "close")
+        )
+        if children:
+            raise UserError(
+                self.env._(
+                    "This asset has value increases that are not removed: "
+                    "%s. Remove them first from their form.",
+                    ", ".join(children.mapped("display_name")),
+                )
+            )
+
     def remove(self):
         self.ensure_one()
+        self._check_value_increases_removed()
         ctx = dict(self.env.context, active_ids=self.ids, active_id=self.id)
 
         early_removal = False

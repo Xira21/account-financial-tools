@@ -157,6 +157,7 @@ class AccountAssetRemove(models.TransientModel):
 
         asset_id = self.env.context.get("active_id")
         asset = self.env["account.asset"].browse(asset_id)
+        asset._check_value_increases_removed()
         asset_ref = asset.code and f"{asset.name} (ref: {asset.code})" or asset.name
 
         if self.env.context.get("early_removal"):
