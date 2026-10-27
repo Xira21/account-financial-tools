@@ -15,7 +15,7 @@
                     />
                     <button
                         name="set_to_draft"
-                        invisible="state not in ['open','close']"
+                        invisible="parent_id or state not in ['open','close']"
                         string="Set to Draft"
                         type="object"
                         groups="account.group_account_manager"
@@ -151,7 +151,7 @@
                                 <group>
                                     <field
                                         name="profile_id"
-                                        readonly="state in ['open', 'close', 'removed']"
+                                        readonly="parent_id or state in ['open', 'close', 'removed']"
                                     />
                                     <field name="group_ids" widget="many2many_tags" />
                                 </group>
@@ -167,6 +167,10 @@
                                     />
                                 </group>
                             </group>
+                            <div class="text-muted" invisible="not parent_id">
+                                The category, the depreciation method and the
+                                duration are managed from the parent asset.
+                            </div>
                             <group>
                                 <group string="Depreciation Dates">
                                     <field

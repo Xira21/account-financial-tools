@@ -59,8 +59,14 @@ class AccountAssetModify(models.TransientModel):
         comodel_name="account.account",
         string="Counterpart Account",
         check_company=True,
-        help="Account credited in the entry of the asset created by a value "
-        "increase.",
+        help="Account the value of the increase comes from. For example: 523 "
+        "Fixed asset suppliers, short term (or 173 long term) if a supplier "
+        "makes the improvement, 572 Banks if it is paid in cash, or 731 Work "
+        "performed for property, plant and equipment if the company makes it. "
+        "Use it only for improvements or extensions that increase the capacity, "
+        "productivity or useful life of the asset; repairs are recorded as an "
+        "expense. If the addition has a different useful life, register it as a "
+        "separate asset.",
     )
     info_message = fields.Text(compute="_compute_info_message")
 

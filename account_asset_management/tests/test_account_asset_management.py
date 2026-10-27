@@ -1545,3 +1545,151 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         self._remove_asset(child, "2025-06-10")
         self._remove_asset(asset, "2025-06-10")
         self.assertEqual(asset.state, "removed")
+
+    def test_41_child_cannot_be_set_to_draft(self):
+        """A value increase is changed from its parent, not in draft."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        with self.assertRaisesRegex(UserError, "Modify the parent asset"):
+            asset.child_ids.set_to_draft()
+        self.assertEqual(asset.child_ids.state, "open")
+
+    def test_42_child_method_cannot_be_changed(self):
+        """The method and the duration of a value increase are managed from its
+        parent, but its other fields can be changed."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        for vals in (
+            {"method": "degressive"},
+            {"method_end": "2026-12-31"},
+            {"method_period": "year"},
+            {"profile_id": self.car5y.id},
+        ):
+            with self.assertRaisesRegex(UserError, "managed from its parent"):
+                child.write(vals)
+        child.write({"note": "Engine improvement", "group_ids": [Command.clear()]})
+        self.assertEqual(child.note, "Engine improvement")
+
+    def _post_child_lines(self, asset, count):
+        child = asset.child_ids
+        posted_lines = child._get_pending_depreciation_lines()[:count]
+        posted_lines.create_move()
+        return child, posted_lines, posted_lines.mapped("amount")
+
+    def _assert_child_board(self, child, posted_lines, posted_amounts):
+        child.invalidate_recordset()
+        self.assertTrue(all(posted_lines.mapped("move_check")))
+        self.assertEqual(posted_lines.mapped("amount"), posted_amounts)
+        self.assertAlmostEqual(
+            sum(posted_amounts)
+            + sum(child._get_pending_depreciation_lines().mapped("amount")),
+            child.depreciation_base,
+            places=2,
+        )
+
+    def test_43_parent_method_and_period_propagate(self):
+        """The method, factor and period of a parent asset changed in draft are
+        copied by its value increases when the parent is recomputed."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        asset.set_to_draft()
+        asset.write(
+            {
+                "method": "degressive",
+                "method_progress_factor": 0.4,
+                "method_period": "quarter",
+            }
+        )
+        asset.compute_depreciation_board()
+        child.invalidate_recordset()
+        self.assertEqual(child.method, "degressive")
+        self.assertEqual(child.method_progress_factor, 0.4)
+        self.assertEqual(child.method_period, "quarter")
+        self.assertEqual(child.method_end, asset._get_depreciation_end_date())
+        self.assertAlmostEqual(
+            sum(child._get_pending_depreciation_lines().mapped("amount")),
+            child.value_residual,
+            places=2,
+        )
+
+    def test_44_propagation_keeps_child_posted_lines(self):
+        """When the duration or the period of the parent changes, the posted
+        depreciations of its value increase do not change and the value of the
+        increase is still fully depreciated."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child, posted_lines, posted_amounts = self._post_child_lines(asset, 2)
+        asset.set_to_draft()
+        asset.method_number = 18
+        asset.compute_depreciation_board()
+        self.assertEqual(child.method_end, date(2026, 6, 30))
+        self._assert_child_board(child, posted_lines, posted_amounts)
+        # from monthly to yearly depreciations
+        asset.write({"method_period": "year", "method_number": 2})
+        asset.compute_depreciation_board()
+        self.assertEqual(child.method_period, "year")
+        self.assertEqual(child.method_end, date(2026, 12, 31))
+        self._assert_child_board(child, posted_lines, posted_amounts)
+
+    def test_45_shorten_parent_before_child_posted_line(self):
+        """The parent must end after the last posted depreciation of its value
+        increase (31/07/2025)."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child, posted_lines, posted_amounts = self._post_child_lines(asset, 2)
+        asset.set_to_draft()
+        for method_number in (6, 7):
+            asset.method_number = method_number
+            # assertRaises rolls back the changes made before the error
+            with self.assertRaises(UserError) as error:
+                asset.compute_depreciation_board()
+            self.assertIn("must be after the last posted", str(error.exception))
+            self.assertIn(child.display_name, str(error.exception))
+            self.env.invalidate_all()
+            self.assertEqual(asset._get_depreciation_end_date(), date(2025, 12, 31))
+            self.assertEqual(child.method_end, date(2025, 12, 31))
+            self._assert_child_board(child, posted_lines, posted_amounts)
+
+    def test_46_cannot_delete_asset_with_children(self):
+        """An asset with value increases cannot be deleted."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        asset.set_to_draft()
+        with self.assertRaisesRegex(UserError, "it has value increases: .*increase"):
+            asset.unlink()
+
+    def test_47_two_increases(self):
+        """Each increase creates its own child and the parent shows their total."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        asset._get_pending_depreciation_lines()[:1].create_move()
+        self._increase_asset_value(asset, "2025-07-01", 700)
+        children = asset.child_ids
+        self.assertEqual(len(children), 2)
+        self.assertEqual(
+            children.mapped("date_start"), [date(2025, 7, 1), date(2025, 6, 3)]
+        )
+        self.assertAlmostEqual(asset.gross_increase_value, 206.67, places=2)
+        self.assertAlmostEqual(
+            asset.total_book_value,
+            asset.value_residual + sum(children.mapped("value_residual")),
+            places=2,
+        )
+        self.assertAlmostEqual(asset.total_book_value, 806.67, places=2)
+
+    def test_48_decrease_parent_keeps_child(self):
+        """A decrease of the parent does not change its value increase."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        child_amounts = child._get_pending_depreciation_lines().mapped("amount")
+        self._modify_asset_value(asset, "2025-06-04", 600)
+        child.invalidate_recordset()
+        self.assertAlmostEqual(asset.value_residual, 600, places=2)
+        self.assertEqual(
+            child._get_pending_depreciation_lines().mapped("amount"), child_amounts
+        )
+        self.assertFalse(child.depreciation_line_ids.filtered("value_decrease"))
+        self.assertAlmostEqual(child.value_residual, 106.67, places=2)

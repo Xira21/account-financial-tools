@@ -468,6 +468,8 @@ class AccountAsset(models.Model):
         return asset_ids
 
     def write(self, vals):
+        if not self.env.context.get("asset_from_parent"):
+            self._check_parent_managed_fields(vals)
         res = super().write(vals)
         for asset in self:
             if self.env.context.get("asset_validate_from_write"):
@@ -480,6 +482,32 @@ class AccountAsset(models.Model):
                 # extra context to avoid recursion
                 asset.with_context(asset_validate_from_write=True).validate()
         return res
+
+    def _get_parent_managed_fields(self):
+        """Fields of the assets created by value increases that are copied
+        from their parent asset."""
+        return [
+            "profile_id",
+            "method",
+            "method_progress_factor",
+            "method_period",
+            "method_time",
+            "method_number",
+            "method_end",
+        ]
+
+    def _check_parent_managed_fields(self, vals):
+        if not set(vals) & set(self._get_parent_managed_fields()):
+            return
+        children = self.filtered("parent_id")
+        if children:
+            raise UserError(
+                self.env._(
+                    "The depreciation method and duration of %s are managed "
+                    "from its parent asset.",
+                    ", ".join(children.mapped("display_name")),
+                )
+            )
 
     def _create_first_asset_line(self):
         self.ensure_one()
@@ -504,6 +532,15 @@ class AccountAsset(models.Model):
             if asset.state != "draft":
                 raise UserError(
                     self.env._("You can only delete assets in draft state.")
+                )
+            if asset.child_ids:
+                raise UserError(
+                    self.env._(
+                        "You cannot delete %(asset)s because it has value "
+                        "increases: %(children)s.",
+                        asset=asset.display_name,
+                        children=", ".join(asset.child_ids.mapped("display_name")),
+                    )
                 )
             if asset.depreciation_line_ids.filtered(
                 lambda r: r.type == "depreciate" and r.move_check
@@ -594,6 +631,12 @@ class AccountAsset(models.Model):
         }
 
     def set_to_draft(self):
+        for asset in self.filtered("parent_id"):
+            raise UserError(
+                self.env._(
+                    "Modify the parent asset (%s).", asset.parent_id.display_name
+                )
+            )
         return self.write({"state": "draft"})
 
     def open_entries(self):
@@ -1067,16 +1110,40 @@ class AccountAsset(models.Model):
                 posted_lines,
             )
         for asset in self:
-            # the value increases end with the asset that they increase
-            end_date = asset._get_depreciation_end_date()
-            children = asset.child_ids.filtered(
-                lambda child, end_date=end_date: child.state == "open"
-                and child.method_end != end_date
-            )
-            if end_date and children:
-                children.write({"method_end": end_date})
-                children.compute_depreciation_board()
+            asset._propagate_to_value_increases()
         return True
+
+    def _propagate_to_value_increases(self):
+        """The running value increases depreciate with the method of this asset
+        and end with it."""
+        self.ensure_one()
+        end_date = self._get_depreciation_end_date()
+        children = self.child_ids.filtered(lambda child: child.state == "open")
+        if not end_date or not children:
+            return
+        for child in children:
+            last_line = child._get_posted_depreciation_lines()[:1]
+            if last_line and last_line.line_date >= end_date:
+                raise UserError(
+                    self.env._(
+                        "The new end date %(date)s must be after the last posted "
+                        "depreciation of the value increase %(asset)s.",
+                        date=format_date(self.env, end_date),
+                        asset=child.display_name,
+                    )
+                )
+        vals = {
+            "method": self.method,
+            "method_progress_factor": self.method_progress_factor,
+            "method_period": self.method_period,
+            "method_end": end_date,
+        }
+        children = children.filtered(
+            lambda child: any(child[field] != value for field, value in vals.items())
+        )
+        if children:
+            children.with_context(asset_from_parent=True).write(vals)
+            children.compute_depreciation_board()
 
     def _get_fy_duration(self, fy, option="days"):
         """Returns fiscal year duration.
