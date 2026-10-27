@@ -1693,3 +1693,65 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         )
         self.assertFalse(child.depreciation_line_ids.filtered("value_decrease"))
         self.assertAlmostEqual(child.value_residual, 106.67, places=2)
+
+    def test_49_modify_value_lock_date(self):
+        """The entries of a change cannot be in a locked period, including the
+        prorata posted the day before the change."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        company = asset.company_id
+        # the prorata of 02/06 is locked
+        company.fiscalyear_lock_date = date(2025, 6, 2)
+        with self.assertRaisesRegex(UserError, "locked period"):
+            self._modify_asset_value(asset, "2025-06-03", 620)
+        # no prorata: 31/05 is posted, but the change of 01/06 is locked
+        company.fiscalyear_lock_date = date(2025, 6, 1)
+        with self.assertRaisesRegex(UserError, "locked period"):
+            self._modify_asset_value(asset, "2025-06-01", 620)
+        self.assertFalse(asset.depreciation_line_ids.filtered("value_decrease"))
+        company.fiscalyear_lock_date = date(2025, 5, 31)
+        self._modify_asset_value(asset, "2025-06-01", 620)
+        self.assertAlmostEqual(asset.value_residual, 620, places=2)
+
+    def test_50_modify_value_before_start_date(self):
+        """The date of a change cannot be before the start of the asset."""
+        asset = self._create_monthly_asset_with_posted_lines(0)
+        with self.assertRaisesRegex(UserError, "before the start date"):
+            self._modify_asset_value(asset, "2024-12-31", 1000)
+
+    def _get_message(self, asset, text):
+        messages = asset.message_ids.filtered(lambda message: text in message.body)
+        self.assertEqual(len(messages), 1)
+        return messages.body
+
+    def test_51_decrease_value_message(self):
+        """A decrease is logged in the chatter of the asset, with the values
+        before and after, the reason and the entries."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._modify_asset_value(asset, "2025-06-03", 620)
+        body = self._get_message(asset, "Value decrease on")
+        self.assertIn("693.33", body)
+        self.assertIn("620.00", body)
+        self.assertIn("Reason: Test", body)
+        prorata_line = asset.depreciation_line_ids.filtered(
+            lambda line: line.line_date == date(2025, 6, 2)
+        )
+        decrease_line = asset.depreciation_line_ids.filtered("value_decrease")
+        for move in prorata_line.move_id | decrease_line.move_id:
+            self.assertIn(move.display_name, body)
+
+    def test_52_increase_value_messages(self):
+        """An increase is logged in the chatter of the parent, with a link to the
+        new asset, and in the chatter of the new asset, with a link to the
+        parent and to the entry."""
+        asset = self._create_monthly_asset_with_posted_lines(5)
+        self._increase_asset_value(asset, "2025-06-03", 800)
+        child = asset.child_ids
+        move = child.account_move_line_ids.move_id
+        body = self._get_message(asset, "Value increase on")
+        self.assertIn("800.00", body)
+        self.assertIn(child.display_name, body)
+        self.assertIn(move.display_name, body)
+        body = self._get_message(child, "Created as a value increase of")
+        self.assertIn(asset.display_name, body)
+        self.assertIn("Reason: Test", body)
+        self.assertIn(move.display_name, body)

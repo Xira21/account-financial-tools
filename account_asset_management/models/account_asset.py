@@ -812,11 +812,12 @@ class AccountAsset(models.Model):
 
     def _depreciate_until(self, until_date):
         """Post the depreciation from the last depreciation until the day
-        before until_date. The rest of the period stays as a pending line."""
+        before until_date. The rest of the period stays as a pending line.
+        Return the posted depreciation line, if any."""
         self.ensure_one()
         line, amount, days = self._get_prorata_depreciation(until_date)
         if not amount:
-            return
+            return self.env["account.asset.line"]
         next_line = self._get_pending_depreciation_lines()[1:2]
         remaining_amount = line.amount - amount
         remaining_vals = {
@@ -840,6 +841,7 @@ class AccountAsset(models.Model):
             )
             next_line.previous_id = remaining_line
         line.create_move()
+        return line
 
     def _get_value_decrease_accounts(self):
         """Return the accounts of the entry of a value decrease: the account

@@ -1,6 +1,7 @@
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
 from dateutil.relativedelta import relativedelta
+from markupsafe import Markup
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
@@ -178,6 +179,13 @@ class AccountAssetModify(models.TransientModel):
                     asset.salvage_value,
                 )
             )
+        if self.date < asset.date_start:
+            raise UserError(
+                self.env._(
+                    "The date cannot be before the start date of the asset (%s).",
+                    format_date(self.env, asset.date_start),
+                )
+            )
         posted_lines = asset._get_posted_depreciation_lines()
         if posted_lines and self.date <= posted_lines[0].line_date:
             raise UserError(
@@ -193,6 +201,22 @@ class AccountAssetModify(models.TransientModel):
                     "All the depreciation lines prior to the date of the change "
                     "must be posted (%s).",
                     pending_lines[0].line_date,
+                )
+            )
+        # the prorata is posted the day before the change
+        first_entry_date = self.date
+        if self.prorata_amount:
+            first_entry_date -= relativedelta(days=1)
+        lock_date = asset.company_id._get_user_fiscal_lock_date(
+            asset.profile_id.journal_id
+        )
+        if first_entry_date <= lock_date:
+            raise UserError(
+                self.env._(
+                    "The entries of this change would be dated %(date)s, which "
+                    "is in a locked period (lock date: %(lock_date)s).",
+                    date=format_date(self.env, first_entry_date),
+                    lock_date=format_date(self.env, lock_date),
                 )
             )
         if self.modification_type == "increase":
@@ -214,9 +238,57 @@ class AccountAssetModify(models.TransientModel):
         asset = self.asset_id
         modification_type = self.modification_type
         difference = self.value_difference
-        asset._depreciate_until(self.date)
+        current_value = self.current_value
+        prorata_line = asset._depreciate_until(self.date)
         if modification_type == "decrease":
-            asset._decrease_value(-difference, self.date)
+            decrease_line = asset._decrease_value(-difference, self.date)
+            moves = prorata_line.move_id | decrease_line.move_id
+            child = False
         else:
-            asset._increase_value(difference, self.date, self.account_counterpart_id)
+            child = asset._increase_value(
+                difference, self.date, self.account_counterpart_id
+            )
+            increase_move = child.account_move_line_ids.move_id
+            moves = prorata_line.move_id | increase_move
+            self._post_child_message(child, increase_move)
+        self._post_modify_message(modification_type, current_value, moves, child)
         return {"type": "ir.actions.act_window_close"}
+
+    def _format_amount(self, amount):
+        return formatLang(self.env, amount, currency_obj=self.currency_id)
+
+    def _post_modify_message(self, modification_type, current_value, moves, child):
+        if modification_type == "decrease":
+            title = self.env._("Value decrease on %s", format_date(self.env, self.date))
+        else:
+            title = self.env._("Value increase on %s", format_date(self.env, self.date))
+        lines = [
+            Markup("<b>%s</b>") % title,
+            self.env._(
+                "Value: %(before)s → %(after)s",
+                before=self._format_amount(current_value),
+                after=self._format_amount(self.new_value),
+            ),
+            self.env._("Reason: %s", self.reason),
+        ]
+        if child:
+            lines.append(self.env._("Value increase: %s", child._get_html_link()))
+        lines.append(
+            self.env._(
+                "Entries: %s",
+                Markup(", ").join(move._get_html_link() for move in moves),
+            )
+        )
+        self.asset_id.message_post(body=Markup("<br/>").join(lines))
+
+    def _post_child_message(self, child, move):
+        lines = [
+            self.env._(
+                "Created as a value increase of %(asset)s on %(date)s.",
+                asset=self.asset_id._get_html_link(),
+                date=format_date(self.env, self.date),
+            ),
+            self.env._("Reason: %s", self.reason),
+            self.env._("Entry: %s", move._get_html_link()),
+        ]
+        child.message_post(body=Markup("<br/>").join(lines))
