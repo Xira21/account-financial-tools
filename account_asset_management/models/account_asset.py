@@ -11,8 +11,9 @@ from traceback import format_exception
 
 from dateutil.relativedelta import relativedelta
 
-from odoo import api, fields, models
+from odoo import Command, api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools.misc import format_date
 
 _logger = logging.getLogger(__name__)
 
@@ -253,10 +254,51 @@ class AccountAsset(models.Model):
         carried forward to the first depreciation line of the current open
         period.""",
     )
+    parent_id = fields.Many2one(
+        comodel_name="account.asset",
+        string="Parent Asset",
+        readonly=True,
+        ondelete="restrict",
+        check_company=True,
+        index="btree_not_null",
+        help="Asset whose value increase created this asset.",
+    )
+    child_ids = fields.One2many(
+        comodel_name="account.asset",
+        inverse_name="parent_id",
+        string="Value Increases",
+        readonly=True,
+    )
+    child_count = fields.Integer(compute="_compute_child_values")
+    gross_increase_value = fields.Monetary(
+        string="Gross Increase",
+        compute="_compute_child_values",
+        help="Purchase value of the assets created by value increases.",
+    )
+    total_book_value = fields.Monetary(
+        compute="_compute_child_values",
+        help="Net book value of this asset and of the assets created by its "
+        "value increases.",
+    )
 
     @api.model
     def _default_company_id(self):
         return self.env.company
+
+    @api.depends(
+        "purchase_value",
+        "value_depreciated",
+        "child_ids.purchase_value",
+        "child_ids.value_depreciated",
+    )
+    def _compute_child_values(self):
+        for asset in self:
+            assets = asset | asset.child_ids
+            asset.child_count = len(asset.child_ids)
+            asset.gross_increase_value = sum(asset.child_ids.mapped("purchase_value"))
+            asset.total_book_value = sum(assets.mapped("purchase_value")) - sum(
+                assets.mapped("value_depreciated")
+            )
 
     @api.depends("depreciation_line_ids.move_id")
     def _compute_move_line_check(self):
@@ -426,6 +468,8 @@ class AccountAsset(models.Model):
         return asset_ids
 
     def write(self, vals):
+        if not self.env.context.get("asset_from_parent"):
+            self._check_parent_managed_fields(vals)
         res = super().write(vals)
         for asset in self:
             if self.env.context.get("asset_validate_from_write"):
@@ -438,6 +482,32 @@ class AccountAsset(models.Model):
                 # extra context to avoid recursion
                 asset.with_context(asset_validate_from_write=True).validate()
         return res
+
+    def _get_parent_managed_fields(self):
+        """Fields of the assets created by value increases that are copied
+        from their parent asset."""
+        return [
+            "profile_id",
+            "method",
+            "method_progress_factor",
+            "method_period",
+            "method_time",
+            "method_number",
+            "method_end",
+        ]
+
+    def _check_parent_managed_fields(self, vals):
+        if not set(vals) & set(self._get_parent_managed_fields()):
+            return
+        children = self.filtered("parent_id")
+        if children:
+            raise UserError(
+                self.env._(
+                    "The depreciation method and duration of %s are managed "
+                    "from its parent asset.",
+                    ", ".join(children.mapped("display_name")),
+                )
+            )
 
     def _create_first_asset_line(self):
         self.ensure_one()
@@ -462,6 +532,15 @@ class AccountAsset(models.Model):
             if asset.state != "draft":
                 raise UserError(
                     self.env._("You can only delete assets in draft state.")
+                )
+            if asset.child_ids:
+                raise UserError(
+                    self.env._(
+                        "You cannot delete %(asset)s because it has value "
+                        "increases: %(children)s.",
+                        asset=asset.display_name,
+                        children=", ".join(asset.child_ids.mapped("display_name")),
+                    )
                 )
             if asset.depreciation_line_ids.filtered(
                 lambda r: r.type == "depreciate" and r.move_check
@@ -501,8 +580,25 @@ class AccountAsset(models.Model):
                     asset.compute_depreciation_board()
         return True
 
+    def _check_value_increases_removed(self):
+        """An asset can only be removed after the assets created by its value
+        increases."""
+        self.ensure_one()
+        children = self.child_ids.filtered(
+            lambda child: child.state in ("open", "close")
+        )
+        if children:
+            raise UserError(
+                self.env._(
+                    "This asset has value increases that are not removed: "
+                    "%s. Remove them first from their form.",
+                    ", ".join(children.mapped("display_name")),
+                )
+            )
+
     def remove(self):
         self.ensure_one()
+        self._check_value_increases_removed()
         ctx = dict(self.env.context, active_ids=self.ids, active_id=self.id)
 
         early_removal = False
@@ -523,7 +619,24 @@ class AccountAsset(models.Model):
             "context": ctx,
         }
 
+    def modify_value(self):
+        self.ensure_one()
+        return {
+            "name": self.env._("Modify Asset Value"),
+            "view_mode": "form",
+            "res_model": "account.asset.modify",
+            "target": "new",
+            "type": "ir.actions.act_window",
+            "context": dict(self.env.context, active_ids=self.ids, active_id=self.id),
+        }
+
     def set_to_draft(self):
+        for asset in self.filtered("parent_id"):
+            raise UserError(
+                self.env._(
+                    "Modify the parent asset (%s).", asset.parent_id.display_name
+                )
+            )
         return self.write({"state": "draft"})
 
     def open_entries(self):
@@ -539,6 +652,27 @@ class AccountAsset(models.Model):
             "type": "ir.actions.act_window",
             "context": context,
             "domain": [("id", "in", self.account_move_line_ids.mapped("move_id").ids)],
+        }
+
+    def action_view_parent(self):
+        self.ensure_one()
+        return {
+            "name": self.env._("Parent Asset"),
+            "view_mode": "form",
+            "res_model": "account.asset",
+            "res_id": self.parent_id.id,
+            "type": "ir.actions.act_window",
+        }
+
+    def action_view_children(self):
+        self.ensure_one()
+        return {
+            "name": self.env._("Value Increases"),
+            "view_mode": "list,form",
+            "res_model": "account.asset",
+            "type": "ir.actions.act_window",
+            "domain": [("parent_id", "=", self.id)],
+            "context": {"create": False},
         }
 
     def _group_lines(self, table):
@@ -619,6 +753,233 @@ class AccountAsset(models.Model):
                     seq -= 1
             line_i_start = 0
 
+    def _get_posted_depreciation_lines(self):
+        """Depreciation lines already accounted for: posted or initial balance.
+        Most recent first."""
+        self.ensure_one()
+        return self.env["account.asset.line"].search(
+            [
+                ("asset_id", "=", self.id),
+                ("type", "=", "depreciate"),
+                "|",
+                ("move_check", "=", True),
+                ("init_entry", "=", True),
+            ],
+            order="line_date desc",
+        )
+
+    def _get_pending_depreciation_lines(self):
+        """Depreciation lines not accounted for yet. Oldest first."""
+        self.ensure_one()
+        lines = self.depreciation_line_ids.filtered(
+            lambda line: line.type == "depreciate"
+            and not line.init_entry
+            and not line.move_check
+        )
+        return lines.sorted(key=lambda line: line.line_date)
+
+    def _get_prorata_depreciation(self, until_date):
+        """Return the first pending depreciation line, with the amount and
+        number of days to depreciate from the last depreciation until the day
+        before until_date."""
+        self.ensure_one()
+        first_dl = self._get_pending_depreciation_lines()[:1]
+        if not first_dl:
+            return first_dl, 0.0, 0
+        previous_dl = first_dl.previous_id
+        while previous_dl.value_decrease:
+            previous_dl = previous_dl.previous_id
+        # the day of the last depreciation is already depreciated: count an
+        # extra day only when counting from the start date of the asset
+        same_month = 0
+        if previous_dl:
+            last_depr_date = previous_dl.line_date
+        else:
+            create_dl = self.depreciation_line_ids.filtered(
+                lambda line: line.type == "create"
+            )
+            last_depr_date = create_dl.line_date
+            same_month = last_depr_date.month == first_dl.line_date.month and 1 or 0
+        period_number_days = (first_dl.line_date - last_depr_date).days + same_month
+        new_line_date = until_date + relativedelta(days=-1)
+        to_depreciate_days = (new_line_date - last_depr_date).days + same_month
+        if to_depreciate_days <= 0:
+            return first_dl, 0.0, 0
+        amount = self.company_id.currency_id.round(
+            float(to_depreciate_days) / float(period_number_days) * first_dl.amount
+        )
+        return first_dl, amount, to_depreciate_days
+
+    def _depreciate_until(self, until_date):
+        """Post the depreciation from the last depreciation until the day
+        before until_date. The rest of the period stays as a pending line.
+        Return the posted depreciation line, if any."""
+        self.ensure_one()
+        line, amount, days = self._get_prorata_depreciation(until_date)
+        if not amount:
+            return self.env["account.asset.line"]
+        next_line = self._get_pending_depreciation_lines()[1:2]
+        remaining_amount = line.amount - amount
+        remaining_vals = {
+            "asset_id": self.id,
+            "name": line.name,
+            "amount": remaining_amount,
+            "line_date": line.line_date,
+            "line_days": line.line_days - days,
+            "type": "depreciate",
+        }
+        line.write(
+            {
+                "amount": amount,
+                "line_date": until_date + relativedelta(days=-1),
+                "line_days": days,
+            }
+        )
+        if not self.currency_id.is_zero(remaining_amount):
+            remaining_line = self.env["account.asset.line"].create(
+                dict(remaining_vals, previous_id=line.id)
+            )
+            next_line.previous_id = remaining_line
+        line.create_move()
+        return line
+
+    def _get_value_decrease_accounts(self):
+        """Return the accounts of the entry of a value decrease: the account
+        credited (accumulated value loss) and the account debited (expense)."""
+        self.ensure_one()
+        profile = self.profile_id
+        return profile.account_depreciation_id, profile.account_expense_depreciation_id
+
+    def _decrease_value(self, amount, decrease_date):
+        """Post a depreciation entry for a decrease of the asset value and
+        spread the new value over the pending depreciation lines."""
+        self.ensure_one()
+        decrease_line = self.env["account.asset.line"].create(
+            {
+                "asset_id": self.id,
+                "previous_id": self._get_posted_depreciation_lines()[:1].id,
+                "name": self.env._("Value decrease"),
+                "amount": amount,
+                "line_date": decrease_date,
+                "type": "depreciate",
+                "value_decrease": True,
+            }
+        )
+        decrease_line.create_move()
+        if self.currency_id.is_zero(self.value_residual):
+            self._get_pending_depreciation_lines().unlink()
+        else:
+            self.compute_depreciation_board()
+        return decrease_line
+
+    def _get_depreciation_end_date(self):
+        self.ensure_one()
+        lines = self.depreciation_line_ids.filtered(
+            lambda line: line.type == "depreciate"
+        )
+        return max(lines.mapped("line_date"), default=False)
+
+    def _increase_value(self, amount, increase_date, counterpart_account):
+        """Create a child asset for an increase of the asset value, depreciated
+        with the same method until the end date of this asset, and post its
+        acquisition entry against the counterpart account."""
+        self.ensure_one()
+        child = self.create(
+            {
+                "parent_id": self.id,
+                "name": self.env._(
+                    "%(name)s (increase %(date)s)",
+                    name=self.name,
+                    date=format_date(self.env, increase_date),
+                ),
+                "code": self.code,
+                "company_id": self.company_id.id,
+                "profile_id": self.profile_id.id,
+                "group_ids": [Command.set(self.group_ids.ids)],
+                "partner_id": self.partner_id.id,
+                "analytic_distribution": self.analytic_distribution,
+                "purchase_value": amount,
+                "salvage_value": 0.0,
+                "date_start": increase_date,
+                "method": self.method,
+                "method_progress_factor": self.method_progress_factor,
+                "method_period": self.method_period,
+                "method_time": "year",
+                "method_end": self._get_depreciation_end_date(),
+                "prorata": True,
+                "days_calc": self.days_calc,
+                "use_leap_years": self.use_leap_years,
+            }
+        )
+        profile = self.profile_id
+        move = (
+            self.env["account.move"]
+            .with_context(allow_asset=True)
+            .create(
+                {
+                    "date": increase_date,
+                    "ref": child.name,
+                    "journal_id": profile.journal_id.id,
+                    "line_ids": [
+                        Command.create(
+                            {
+                                "name": child.name,
+                                "account_id": profile.account_asset_id.id,
+                                "debit": amount,
+                                "credit": 0.0,
+                                "partner_id": child.partner_id.id,
+                                "asset_id": child.id,
+                            }
+                        ),
+                        Command.create(
+                            {
+                                "name": child.name,
+                                "account_id": counterpart_account.id,
+                                "debit": 0.0,
+                                "credit": amount,
+                                "partner_id": child.partner_id.id,
+                                "asset_profile_id": False,
+                            }
+                        ),
+                    ],
+                }
+            )
+        )
+        move.action_post()
+        child.depreciation_line_ids.filtered(
+            lambda line: line.type == "create"
+        ).move_id = move
+        child.validate()
+        return child
+
+    def _spread_residual_value(
+        self, table, table_i_start, line_i_start, last_date, depreciated_value
+    ):
+        """Spread the value still to depreciate over the pending lines of the
+        table, in proportion to their planned amounts. A line whose period is
+        partly depreciated only weighs its remaining days."""
+        amount = self.depreciation_base - depreciated_value
+        if self.method in ["linear-limit", "degr-limit"]:
+            amount -= self.salvage_value
+        lines = []
+        for entry in table[table_i_start:]:
+            lines += entry["lines"][line_i_start:]
+            line_i_start = 0
+        if not lines:
+            return
+        weights = [line["amount"] for line in lines]
+        if last_date and lines[0]["days"]:
+            remaining_days = (lines[0]["date"] - last_date).days
+            if remaining_days < lines[0]["days"]:
+                weights[0] *= remaining_days / lines[0]["days"]
+                lines[0]["days"] = remaining_days
+        total_weight = sum(weights)
+        for line, weight in zip(lines, weights, strict=True):
+            if total_weight:
+                line["amount"] = amount * weight / total_weight
+            else:
+                line["amount"] = amount / len(lines)
+
     def compute_depreciation_board(self):
         line_obj = self.env["account.asset.line"]
 
@@ -626,18 +987,10 @@ class AccountAsset(models.Model):
             currency = asset.company_id.currency_id
             if currency.is_zero(asset.value_residual):
                 continue
-            domain = [
-                ("asset_id", "=", asset.id),
-                ("type", "=", "depreciate"),
-                "|",
-                ("move_check", "=", True),
-                ("init_entry", "=", True),
-            ]
-            posted_lines = line_obj.search(domain, order="line_date desc")
-            if posted_lines:
-                last_line = posted_lines[0]
-            else:
-                last_line = line_obj
+            posted_lines = asset._get_posted_depreciation_lines()
+            decrease_lines = posted_lines.filtered("value_decrease")
+            depreciation_lines = posted_lines - decrease_lines
+            last_line = posted_lines[:1]
             domain = [
                 ("asset_id", "=", asset.id),
                 ("type", "=", "depreciate"),
@@ -657,10 +1010,12 @@ class AccountAsset(models.Model):
             # check table with posted entries and
             # recompute in case of deviation
             depreciated_value_posted = depreciated_value = 0.0
-            if posted_lines:
+            if depreciation_lines:
                 total_table_lines = sum(len(entry["lines"]) for entry in table)
-                move_check_lines = asset.depreciation_line_ids.filtered("move_check")
-                last_depreciation_date = last_line.line_date
+                move_check_lines = asset.depreciation_line_ids.filtered(
+                    lambda line: line.move_check and not line.value_decrease
+                )
+                last_depreciation_date = depreciation_lines[0].line_date
                 last_date_in_table = table[-1]["lines"][-1]["date"]
                 # If the number of lines in the table is the same as the depreciation
                 # lines, we will not show an error even if the dates are the same.
@@ -697,6 +1052,10 @@ class AccountAsset(models.Model):
                         date_min = line["date"]
                     if line["date"] == last_depreciation_date:
                         _line_i += 1
+                    else:
+                        # the last posting is in the middle of this line:
+                        # compare with the residual value before this line
+                        residual_amount_table += line["amount"]
                 table_i_start = _table_i
                 line_i_start = _line_i
 
@@ -707,7 +1066,7 @@ class AccountAsset(models.Model):
                 )
                 residual_amount = asset.depreciation_base - depreciated_value
                 amount_diff = currency.round(residual_amount_table - residual_amount)
-                if amount_diff:
+                if amount_diff and not decrease_lines:
                     # We will auto-create a new line because the number of lines in
                     # the tables are the same as the posted depreciations and there
                     # is still a residual value. Only in this case we will need to
@@ -727,6 +1086,19 @@ class AccountAsset(models.Model):
             else:  # no posted lines
                 table_i_start = 0
                 line_i_start = 0
+                last_depreciation_date = False
+
+            if decrease_lines:
+                # assets with a value decrease keep the new value spread
+                # over all the pending lines
+                depreciated_value_posted = sum(posted_lines.mapped("amount"))
+                asset._spread_residual_value(
+                    table,
+                    table_i_start,
+                    line_i_start,
+                    last_depreciation_date,
+                    depreciated_value_posted,
+                )
 
             asset._compute_depreciation_line(
                 depreciated_value_posted,
@@ -736,7 +1108,42 @@ class AccountAsset(models.Model):
                 last_line,
                 posted_lines,
             )
+        self._propagate_to_value_increases()
         return True
+
+    def _propagate_to_value_increases(self):
+        """The running value increases depreciate with the method of their
+        asset and end with it."""
+        for asset in self:
+            end_date = asset._get_depreciation_end_date()
+            children = asset.child_ids.filtered(lambda child: child.state == "open")
+            if not end_date or not children:
+                continue
+            for child in children:
+                last_line = child._get_posted_depreciation_lines()[:1]
+                if last_line and last_line.line_date >= end_date:
+                    raise UserError(
+                        self.env._(
+                            "The new end date %(date)s must be after the last "
+                            "posted depreciation of the value increase %(asset)s.",
+                            date=format_date(self.env, end_date),
+                            asset=child.display_name,
+                        )
+                    )
+            vals = {
+                "method": asset.method,
+                "method_progress_factor": asset.method_progress_factor,
+                "method_period": asset.method_period,
+                "method_end": end_date,
+            }
+            children = children.filtered(
+                lambda child, vals=vals: any(
+                    child[field] != value for field, value in vals.items()
+                )
+            )
+            if children:
+                children.with_context(asset_from_parent=True).write(vals)
+                children.compute_depreciation_board()
 
     def _get_fy_duration(self, fy, option="days"):
         """Returns fiscal year duration.

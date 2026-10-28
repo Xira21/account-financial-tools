@@ -1,0 +1,293 @@
+# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
+
+from dateutil.relativedelta import relativedelta
+from markupsafe import Markup
+
+from odoo import api, fields, models
+from odoo.exceptions import UserError
+from odoo.tools.misc import format_date, formatLang
+
+
+class AccountAssetModify(models.TransientModel):
+    _name = "account.asset.modify"
+    _description = "Modify Asset Value"
+
+    asset_id = fields.Many2one(
+        comodel_name="account.asset",
+        string="Asset",
+        required=True,
+        readonly=True,
+        default=lambda self: self.env.context.get("active_id"),
+    )
+    company_id = fields.Many2one(related="asset_id.company_id")
+    currency_id = fields.Many2one(related="asset_id.currency_id")
+    date = fields.Date(
+        required=True,
+        default=fields.Date.context_today,
+        help="Date of the value change. The asset is depreciated with the "
+        "current plan until the day before this date.",
+    )
+    reason = fields.Char(required=True)
+    new_value = fields.Monetary(
+        compute="_compute_new_value",
+        store=True,
+        readonly=False,
+        help="New net book value of the asset at the date of the change.",
+    )
+    purchase_value = fields.Monetary(related="asset_id.purchase_value")
+    prorata_amount = fields.Monetary(compute="_compute_current_value")
+    depreciated_value = fields.Monetary(
+        compute="_compute_current_value",
+        help="Depreciation posted until the day before the date of the change, "
+        "including the prorata of the current period.",
+    )
+    current_value = fields.Monetary(
+        compute="_compute_current_value",
+        help="Net book value of the asset at the date of the change: "
+        "Purchase Value - Depreciated Value.",
+    )
+    value_difference = fields.Monetary(
+        string="Difference",
+        compute="_compute_value_difference",
+    )
+    modification_type = fields.Selection(
+        selection=[("increase", "Increase"), ("decrease", "Decrease")],
+        string="Type",
+        compute="_compute_value_difference",
+    )
+    account_counterpart_id = fields.Many2one(
+        comodel_name="account.account",
+        string="Counterpart Account",
+        check_company=True,
+        help="Account the value of the increase comes from. For example: 523 "
+        "Fixed asset suppliers, short term (or 173 long term) if a supplier "
+        "makes the improvement, 572 Banks if it is paid in cash, or 731 Work "
+        "performed for property, plant and equipment if the company makes it. "
+        "Use it only for improvements or extensions that increase the capacity, "
+        "productivity or useful life of the asset; repairs are recorded as an "
+        "expense. If the addition has a different useful life, register it as a "
+        "separate asset.",
+    )
+    info_message = fields.Text(compute="_compute_info_message")
+
+    @api.depends("asset_id", "date")
+    def _compute_current_value(self):
+        for wiz in self:
+            asset = wiz.asset_id
+            prorata_amount = 0.0
+            pending_lines = asset._get_pending_depreciation_lines()
+            if wiz.date and pending_lines and wiz.date <= pending_lines[0].line_date:
+                prorata_amount = asset._get_prorata_depreciation(wiz.date)[1]
+            wiz.prorata_amount = prorata_amount
+            wiz.depreciated_value = asset.value_depreciated + prorata_amount
+            wiz.current_value = asset.purchase_value - wiz.depreciated_value
+
+    @api.depends("current_value")
+    def _compute_new_value(self):
+        for wiz in self:
+            wiz.new_value = wiz.current_value
+
+    @api.depends("date", "prorata_amount", "modification_type", "value_difference")
+    def _compute_info_message(self):
+        for wiz in self:
+            messages = []
+            if wiz.prorata_amount:
+                messages.append(
+                    self.env._(
+                        "A depreciation entry of %(amount)s will be posted on "
+                        "%(date)s, for the depreciation until the day before "
+                        "the change.",
+                        amount=formatLang(
+                            self.env, wiz.prorata_amount, currency_obj=wiz.currency_id
+                        ),
+                        date=format_date(self.env, wiz.date - relativedelta(days=1)),
+                    )
+                )
+            if wiz.modification_type == "decrease":
+                messages.append(
+                    self.env._(
+                        "A value decrease entry of %(amount)s will be posted on "
+                        "%(date)s, and the new value will be spread over all "
+                        "the pending depreciations.",
+                        amount=formatLang(
+                            self.env,
+                            -wiz.value_difference,
+                            currency_obj=wiz.currency_id,
+                        ),
+                        date=format_date(self.env, wiz.date),
+                    )
+                )
+            elif wiz.modification_type == "increase":
+                messages.append(
+                    self.env._(
+                        "A new asset of %(amount)s will be created, depreciated "
+                        "from %(date)s until %(end_date)s, with an entry on the "
+                        "asset account against the counterpart account.",
+                        amount=formatLang(
+                            self.env,
+                            wiz.value_difference,
+                            currency_obj=wiz.currency_id,
+                        ),
+                        date=format_date(self.env, wiz.date),
+                        end_date=format_date(
+                            self.env, wiz.asset_id._get_depreciation_end_date()
+                        ),
+                    )
+                )
+            if wiz.asset_id.child_ids:
+                messages.append(
+                    self.env._(
+                        "This asset has value increases, with a total book value "
+                        "of %(amount)s. The change only affects this asset.",
+                        amount=formatLang(
+                            self.env,
+                            wiz.asset_id.total_book_value,
+                            currency_obj=wiz.currency_id,
+                        ),
+                    )
+                )
+            wiz.info_message = "\n".join(messages)
+
+    @api.depends("new_value", "current_value")
+    def _compute_value_difference(self):
+        for wiz in self:
+            difference = wiz.new_value - wiz.current_value
+            comparison = wiz.currency_id.compare_amounts(difference, 0)
+            wiz.value_difference = difference
+            if comparison > 0:
+                wiz.modification_type = "increase"
+            elif comparison < 0:
+                wiz.modification_type = "decrease"
+            else:
+                wiz.modification_type = False
+
+    def _check_modify(self):
+        self.ensure_one()
+        asset = self.asset_id
+        currency = self.currency_id
+        if asset.state != "open":
+            raise UserError(self.env._("Only running assets can be modified."))
+        if not self.modification_type:
+            raise UserError(
+                self.env._("The new value must be different from the current value.")
+            )
+        if currency.compare_amounts(self.new_value, asset.salvage_value) < 0:
+            raise UserError(
+                self.env._(
+                    "The new value cannot be lower than the salvage value (%s).",
+                    asset.salvage_value,
+                )
+            )
+        if self.date < asset.date_start:
+            raise UserError(
+                self.env._(
+                    "The date cannot be before the start date of the asset (%s).",
+                    format_date(self.env, asset.date_start),
+                )
+            )
+        posted_lines = asset._get_posted_depreciation_lines()
+        if posted_lines and self.date <= posted_lines[0].line_date:
+            raise UserError(
+                self.env._(
+                    "The date must be after the last posted depreciation (%s).",
+                    posted_lines[0].line_date,
+                )
+            )
+        pending_lines = asset._get_pending_depreciation_lines()
+        if pending_lines and self.date > pending_lines[0].line_date:
+            raise UserError(
+                self.env._(
+                    "All the depreciation lines prior to the date of the change "
+                    "must be posted (%s).",
+                    pending_lines[0].line_date,
+                )
+            )
+        # the prorata is posted the day before the change
+        first_entry_date = self.date
+        if self.prorata_amount:
+            first_entry_date -= relativedelta(days=1)
+        lock_date = asset.company_id._get_user_fiscal_lock_date(
+            asset.profile_id.journal_id
+        )
+        if first_entry_date <= lock_date:
+            raise UserError(
+                self.env._(
+                    "The entries of this change would be dated %(date)s, which "
+                    "is in a locked period (lock date: %(lock_date)s).",
+                    date=format_date(self.env, first_entry_date),
+                    lock_date=format_date(self.env, lock_date),
+                )
+            )
+        if self.modification_type == "increase":
+            if asset.parent_id:
+                raise UserError(
+                    self.env._(
+                        "Make the increase from the parent asset (%s).",
+                        asset.parent_id.display_name,
+                    )
+                )
+            if not self.account_counterpart_id:
+                raise UserError(
+                    self.env._("A counterpart account is required for an increase.")
+                )
+
+    def modify(self):
+        self.ensure_one()
+        self._check_modify()
+        asset = self.asset_id
+        modification_type = self.modification_type
+        difference = self.value_difference
+        current_value = self.current_value
+        prorata_line = asset._depreciate_until(self.date)
+        if modification_type == "decrease":
+            decrease_line = asset._decrease_value(-difference, self.date)
+            moves = prorata_line.move_id | decrease_line.move_id
+            child = False
+        else:
+            child = asset._increase_value(
+                difference, self.date, self.account_counterpart_id
+            )
+            increase_move = child.account_move_line_ids.move_id
+            moves = prorata_line.move_id | increase_move
+            self._post_child_message(child, increase_move)
+        self._post_modify_message(modification_type, current_value, moves, child)
+        return {"type": "ir.actions.act_window_close"}
+
+    def _format_amount(self, amount):
+        return formatLang(self.env, amount, currency_obj=self.currency_id)
+
+    def _post_modify_message(self, modification_type, current_value, moves, child):
+        if modification_type == "decrease":
+            title = self.env._("Value decrease on %s", format_date(self.env, self.date))
+        else:
+            title = self.env._("Value increase on %s", format_date(self.env, self.date))
+        lines = [
+            Markup("<b>%s</b>") % title,
+            self.env._(
+                "Value: %(before)s → %(after)s",
+                before=self._format_amount(current_value),
+                after=self._format_amount(self.new_value),
+            ),
+            self.env._("Reason: %s", self.reason),
+        ]
+        if child:
+            lines.append(self.env._("Value increase: %s", child._get_html_link()))
+        lines.append(
+            self.env._(
+                "Entries: %s",
+                Markup(", ").join(move._get_html_link() for move in moves),
+            )
+        )
+        self.asset_id.message_post(body=Markup("<br/>").join(lines))
+
+    def _post_child_message(self, child, move):
+        lines = [
+            self.env._(
+                "Created as a value increase of %(asset)s on %(date)s.",
+                asset=self.asset_id._get_html_link(),
+                date=format_date(self.env, self.date),
+            ),
+            self.env._("Reason: %s", self.reason),
+            self.env._("Entry: %s", move._get_html_link()),
+        ]
+        child.message_post(body=Markup("<br/>").join(lines))

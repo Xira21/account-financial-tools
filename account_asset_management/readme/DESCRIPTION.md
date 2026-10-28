@@ -5,6 +5,9 @@ accounting entries from the depreciation lines.
 The full asset life-cycle is managed (from asset creation to asset
 removal).
 
+The value of a running asset can also be increased or decreased (see
+the Usage section).
+
 Assets can be created manually as well as automatically (via the
 creation of an accounting entry on the asset account).
 

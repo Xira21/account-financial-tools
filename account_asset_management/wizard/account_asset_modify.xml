@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<odoo>
+    <record id="account_asset_modify_view_form" model="ir.ui.view">
+        <field name="name">account.asset.modify.form</field>
+        <field name="model">account.asset.modify</field>
+        <field name="arch" type="xml">
+            <form>
+                <div
+                    class="alert alert-info"
+                    role="alert"
+                    invisible="modification_type"
+                >
+                    The new value is the same as the current value:
+                    the value of the asset will not change.
+                </div>
+                <group>
+                    <group>
+                        <field name="asset_id" />
+                        <field name="currency_id" invisible="1" />
+                        <field name="company_id" invisible="1" />
+                        <field name="date" />
+                        <field name="reason" />
+                        <field name="new_value" />
+                        <field
+                            name="account_counterpart_id"
+                            invisible="modification_type != 'increase'"
+                            required="modification_type == 'increase'"
+                        />
+                    </group>
+                    <group string="Summary">
+                        <field name="purchase_value" />
+                        <field name="depreciated_value" />
+                        <field name="current_value" />
+                        <field name="value_difference" />
+                        <field
+                            name="modification_type"
+                            widget="badge"
+                            decoration-success="modification_type == 'increase'"
+                            decoration-danger="modification_type == 'decrease'"
+                        />
+                    </group>
+                </group>
+                <div class="text-muted" invisible="not info_message">
+                    <field name="info_message" nolabel="1" />
+                </div>
+                <footer>
+                    <button
+                        string="Modify"
+                        name="modify"
+                        type="object"
+                        class="oe_highlight"
+                    />
+                    <button string="Cancel" class="oe_link" special="cancel" />
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

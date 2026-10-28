@@ -18,6 +18,7 @@
         "security/account_asset_security.xml",
         "security/ir.model.access.csv",
         "wizard/account_asset_compute.xml",
+        "wizard/account_asset_modify.xml",
         "wizard/account_asset_remove.xml",
         "views/account_account.xml",
         "views/account_asset.xml",
