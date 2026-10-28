@@ -8,7 +8,8 @@
                 <div
                     class="alert alert-info"
                     role="alert"
-                    invisible="modification_type">
+                    invisible="modification_type"
+                >
                     The new value is the same as the current value:
                     the value of the asset will not change.
                 </div>

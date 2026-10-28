@@ -29,7 +29,6 @@ class AccountAssetModify(models.TransientModel):
     )
     reason = fields.Char(required=True)
     new_value = fields.Monetary(
-        string="New Value",
         compute="_compute_new_value",
         store=True,
         readonly=False,

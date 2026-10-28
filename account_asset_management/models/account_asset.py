@@ -990,10 +990,7 @@ class AccountAsset(models.Model):
             posted_lines = asset._get_posted_depreciation_lines()
             decrease_lines = posted_lines.filtered("value_decrease")
             depreciation_lines = posted_lines - decrease_lines
-            if posted_lines:
-                last_line = posted_lines[0]
-            else:
-                last_line = line_obj
+            last_line = posted_lines[:1]
             domain = [
                 ("asset_id", "=", asset.id),
                 ("type", "=", "depreciate"),
@@ -1111,41 +1108,42 @@ class AccountAsset(models.Model):
                 last_line,
                 posted_lines,
             )
-        for asset in self:
-            asset._propagate_to_value_increases()
+        self._propagate_to_value_increases()
         return True
 
     def _propagate_to_value_increases(self):
-        """The running value increases depreciate with the method of this asset
-        and end with it."""
-        self.ensure_one()
-        end_date = self._get_depreciation_end_date()
-        children = self.child_ids.filtered(lambda child: child.state == "open")
-        if not end_date or not children:
-            return
-        for child in children:
-            last_line = child._get_posted_depreciation_lines()[:1]
-            if last_line and last_line.line_date >= end_date:
-                raise UserError(
-                    self.env._(
-                        "The new end date %(date)s must be after the last posted "
-                        "depreciation of the value increase %(asset)s.",
-                        date=format_date(self.env, end_date),
-                        asset=child.display_name,
+        """The running value increases depreciate with the method of their
+        asset and end with it."""
+        for asset in self:
+            end_date = asset._get_depreciation_end_date()
+            children = asset.child_ids.filtered(lambda child: child.state == "open")
+            if not end_date or not children:
+                continue
+            for child in children:
+                last_line = child._get_posted_depreciation_lines()[:1]
+                if last_line and last_line.line_date >= end_date:
+                    raise UserError(
+                        self.env._(
+                            "The new end date %(date)s must be after the last "
+                            "posted depreciation of the value increase %(asset)s.",
+                            date=format_date(self.env, end_date),
+                            asset=child.display_name,
+                        )
                     )
+            vals = {
+                "method": asset.method,
+                "method_progress_factor": asset.method_progress_factor,
+                "method_period": asset.method_period,
+                "method_end": end_date,
+            }
+            children = children.filtered(
+                lambda child, vals=vals: any(
+                    child[field] != value for field, value in vals.items()
                 )
-        vals = {
-            "method": self.method,
-            "method_progress_factor": self.method_progress_factor,
-            "method_period": self.method_period,
-            "method_end": end_date,
-        }
-        children = children.filtered(
-            lambda child: any(child[field] != value for field, value in vals.items())
-        )
-        if children:
-            children.with_context(asset_from_parent=True).write(vals)
-            children.compute_depreciation_board()
+            )
+            if children:
+                children.with_context(asset_from_parent=True).write(vals)
+                children.compute_depreciation_board()
 
     def _get_fy_duration(self, fy, option="days"):
         """Returns fiscal year duration.

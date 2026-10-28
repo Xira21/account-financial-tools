@@ -1188,8 +1188,7 @@ class TestAssetManagement(AccountTestInvoicingCommon):
         self.assertTrue(decrease_line.move_id)
         self.assertNotEqual(decrease_line.move_id, prorata_line.move_id)
         expense_line = decrease_line.move_id.line_ids.filtered(
-            lambda line: line.account_id
-            == self.ict3Y.account_expense_depreciation_id
+            lambda line: line.account_id == self.ict3Y.account_expense_depreciation_id
         )
         self.assertAlmostEqual(expense_line.debit, 73.33, places=2)
         self.assertAlmostEqual(asset.value_residual, 620, places=2)
@@ -1451,9 +1450,7 @@ class TestAssetManagement(AccountTestInvoicingCommon):
     def test_35_increase_value_degressive_number_of_depreciations(self):
         """The value increase of an asset with a number of depreciations ends
         on the end date of the asset."""
-        asset = self._create_asset_with_posted_lines(
-            "degressive", method_time="number"
-        )
+        asset = self._create_asset_with_posted_lines("degressive", method_time="number")
         child = self._check_increase_child_plan(asset)
         self.assertEqual(child.method_end, asset._get_depreciation_end_date())
 
