@@ -21,3 +21,4 @@
 - [Sygel](https://www.sygel.es):
   - Manuel Regidor \<<manuel.regidor@sygel.es>\>
 - [Acysos S.L.](https://www.acysos.com)
+- Natalia Laguna

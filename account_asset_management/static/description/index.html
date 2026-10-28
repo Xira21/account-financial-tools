@@ -380,6 +380,8 @@ depreciation’s occurred on those assets. And it allows to create
 accounting entries from the depreciation lines.</p>
 <p>The full asset life-cycle is managed (from asset creation to asset
 removal).</p>
+<p>The value of a running asset can also be increased or decreased (see the
+Usage section).</p>
 <p>Assets can be created manually as well as automatically (via the
 creation of an accounting entry on the asset account).</p>
 <p>Depreciation Journal Entries can be created manually in the “Deprecation
@@ -394,21 +396,31 @@ to the standard account_asset module from Odoo.</p>
 <p><strong>Table of contents</strong></p>
 <div class="contents local topic" id="contents">
 <ul class="simple">
-<li><a class="reference internal" href="#usage" id="toc-entry-1">Usage</a></li>
-<li><a class="reference internal" href="#changelog" id="toc-entry-2">Changelog</a><ul>
-<li><a class="reference internal" href="#section-1" id="toc-entry-3">14.0.1.0.0 (2021-01-08)</a></li>
-<li><a class="reference internal" href="#section-2" id="toc-entry-4">13.0.3.0.0 (2021-07-06)</a></li>
-<li><a class="reference internal" href="#section-3" id="toc-entry-5">13.0.2.0.0 (2021-02-19)</a></li>
-<li><a class="reference internal" href="#section-4" id="toc-entry-6">13.0.1.0.0 (2019-10-21)</a></li>
-<li><a class="reference internal" href="#section-5" id="toc-entry-7">12.0.2.1.0 (2019-10-21)</a></li>
-<li><a class="reference internal" href="#section-6" id="toc-entry-8">12.0.1.0.0 (2019-01-13)</a></li>
+<li><a class="reference internal" href="#usage" id="toc-entry-1">Usage</a><ul>
+<li><a class="reference internal" href="#modify-the-value-of-a-running-asset" id="toc-entry-2">Modify the value of a running asset</a><ul>
+<li><a class="reference internal" href="#value-decrease" id="toc-entry-3">Value decrease</a></li>
+<li><a class="reference internal" href="#value-increase" id="toc-entry-4">Value increase</a></li>
+<li><a class="reference internal" href="#value-increase-assets" id="toc-entry-5">Value increase assets</a></li>
+<li><a class="reference internal" href="#checks-and-history" id="toc-entry-6">Checks and history</a></li>
+<li><a class="reference internal" href="#undoing-a-value-modification" id="toc-entry-7">Undoing a value modification</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#bug-tracker" id="toc-entry-9">Bug Tracker</a></li>
-<li><a class="reference internal" href="#credits" id="toc-entry-10">Credits</a><ul>
-<li><a class="reference internal" href="#authors" id="toc-entry-11">Authors</a></li>
-<li><a class="reference internal" href="#contributors" id="toc-entry-12">Contributors</a></li>
-<li><a class="reference internal" href="#maintainers" id="toc-entry-13">Maintainers</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#changelog" id="toc-entry-8">Changelog</a><ul>
+<li><a class="reference internal" href="#section-1" id="toc-entry-9">14.0.1.0.0 (2021-01-08)</a></li>
+<li><a class="reference internal" href="#section-2" id="toc-entry-10">13.0.3.0.0 (2021-07-06)</a></li>
+<li><a class="reference internal" href="#section-3" id="toc-entry-11">13.0.2.0.0 (2021-02-19)</a></li>
+<li><a class="reference internal" href="#section-4" id="toc-entry-12">13.0.1.0.0 (2019-10-21)</a></li>
+<li><a class="reference internal" href="#section-5" id="toc-entry-13">12.0.2.1.0 (2019-10-21)</a></li>
+<li><a class="reference internal" href="#section-6" id="toc-entry-14">12.0.1.0.0 (2019-01-13)</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#bug-tracker" id="toc-entry-15">Bug Tracker</a></li>
+<li><a class="reference internal" href="#credits" id="toc-entry-16">Credits</a><ul>
+<li><a class="reference internal" href="#authors" id="toc-entry-17">Authors</a></li>
+<li><a class="reference internal" href="#contributors" id="toc-entry-18">Contributors</a></li>
+<li><a class="reference internal" href="#maintainers" id="toc-entry-19">Maintainers</a></li>
 </ul>
 </li>
 </ul>
@@ -416,11 +428,94 @@ to the standard account_asset module from Odoo.</p>
 <div class="section" id="usage">
 <h2><a class="toc-backref" href="#toc-entry-1">Usage</a></h2>
 <p>The module in NOT compatible with the standard account_asset module.</p>
+<div class="section" id="modify-the-value-of-a-running-asset">
+<h3><a class="toc-backref" href="#toc-entry-2">Modify the value of a running asset</a></h3>
+<p>The value of a running asset can be increased or decreased with the
+<strong>Modify Value</strong> button of the asset form (Accounting Manager rights).
+The wizard asks for the date of the change, a reason and the new net
+book value of the asset at that date, and it shows a summary of what
+will be posted.</p>
+<p>All the depreciation lines before the date of the change must be posted.
+The asset is first depreciated with its current plan until the day
+before the change: the depreciation line of the current period is split
+and its first part is posted.</p>
+<div class="section" id="value-decrease">
+<h4><a class="toc-backref" href="#toc-entry-3">Value decrease</a></h4>
+<ul class="simple">
+<li>A depreciation entry is posted for the decrease, on the date of the
+change, with the depreciation accounts of the asset profile. It is
+shown in the depreciation board with its own description.</li>
+<li>The new value is spread over all the pending depreciation lines, in
+proportion to the depreciation plan, so the shape of the plan is kept
+(also for degressive methods). Recomputing the depreciation board
+keeps this spread.</li>
+<li>The new value cannot be lower than the salvage value. A decrease to
+zero (or to the salvage value) closes the asset.</li>
+<li>On an asset with value increases, a decrease only changes that asset;
+the wizard shows the total value for information.</li>
+</ul>
+</div>
+<div class="section" id="value-increase">
+<h4><a class="toc-backref" href="#toc-entry-4">Value increase</a></h4>
+<ul class="simple">
+<li>The asset keeps its depreciation plan, and a new asset is created for
+the increase: it starts on the date of the change, it has the same
+profile and depreciation method, and it ends on the same date as the
+increased asset.</li>
+<li>Its acquisition entry is posted on the asset account against the
+<strong>Counterpart Account</strong> chosen in the wizard (for example, the
+supplier or bank account, or the work performed by the company).</li>
+<li>Use it only for improvements or extensions that increase the capacity,
+productivity or useful life of the asset. Repairs are recorded as an
+expense, and an addition with a different useful life is registered as
+a separate asset.</li>
+</ul>
+<p>The increased asset shows its value increases with the <strong>Increases</strong>
+button, with their gross value and the total book value. Each value
+increase shows its parent with the <strong>Parent Asset</strong> button.</p>
+</div>
+<div class="section" id="value-increase-assets">
+<h4><a class="toc-backref" href="#toc-entry-5">Value increase assets</a></h4>
+<ul class="simple">
+<li>Their value cannot be increased: increases are made from the parent
+asset.</li>
+<li>Their depreciation method, duration and profile are managed from the
+parent asset: they cannot be changed nor set to draft. When the parent
+asset is set to draft, changed and recomputed, its running value
+increases follow its method, period and end date, without changing
+their posted depreciation lines.</li>
+<li>Their value can be decreased, and they are removed separately with the
+usual removal wizard.</li>
+<li>The parent asset can only be removed after its value increases have
+been removed, and an asset with value increases cannot be deleted.</li>
+</ul>
+</div>
+<div class="section" id="checks-and-history">
+<h4><a class="toc-backref" href="#toc-entry-6">Checks and history</a></h4>
+<ul class="simple">
+<li>The date of the change cannot be before the start date of the asset,
+and its entries (including the depreciation of the day before the
+change) cannot be in a locked period.</li>
+<li>Each change is logged in the chatter of the asset, with the values
+before and after the change, the reason and links to the entries. A
+value increase is also logged in the chatter of the new asset.</li>
+</ul>
+</div>
+<div class="section" id="undoing-a-value-modification">
+<h4><a class="toc-backref" href="#toc-entry-7">Undoing a value modification</a></h4>
+<p>Deleting or reversing the journal entry of a value modification does not
+undo the modification, as in Odoo Enterprise: for a decrease or the
+prorata depreciation, the amount is posted again later; for an increase,
+the increase asset keeps running. To correct a modification, make the
+opposite one (an increase to cancel a decrease, or a decrease on the
+increase asset).</p>
+</div>
+</div>
 </div>
 <div class="section" id="changelog">
-<h2><a class="toc-backref" href="#toc-entry-2">Changelog</a></h2>
+<h2><a class="toc-backref" href="#toc-entry-8">Changelog</a></h2>
 <div class="section" id="section-1">
-<h3><a class="toc-backref" href="#toc-entry-3">14.0.1.0.0 (2021-01-08)</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-9">14.0.1.0.0 (2021-01-08)</a></h3>
 <blockquote>
 <ul class="simple">
 <li>[BREAKING] Removed all functionality associated with
@@ -429,20 +524,20 @@ account.fiscal.year</li>
 </blockquote>
 </div>
 <div class="section" id="section-2">
-<h3><a class="toc-backref" href="#toc-entry-4">13.0.3.0.0 (2021-07-06)</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-10">13.0.3.0.0 (2021-07-06)</a></h3>
 <ul class="simple">
 <li>Allow to reverse the posting of a depreciation line instead of
 deleting the journal entry.</li>
 </ul>
 </div>
 <div class="section" id="section-3">
-<h3><a class="toc-backref" href="#toc-entry-5">13.0.2.0.0 (2021-02-19)</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-11">13.0.2.0.0 (2021-02-19)</a></h3>
 <ul class="simple">
 <li>Add support for multi-company</li>
 </ul>
 </div>
 <div class="section" id="section-4">
-<h3><a class="toc-backref" href="#toc-entry-6">13.0.1.0.0 (2019-10-21)</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-12">13.0.1.0.0 (2019-10-21)</a></h3>
 <ul class="simple">
 <li>Python code and views were adapted to be compatible with v13.</li>
 <li>When assets are created through accounting journal items, they are
@@ -461,13 +556,13 @@ option.</li>
 </ul>
 </div>
 <div class="section" id="section-5">
-<h3><a class="toc-backref" href="#toc-entry-7">12.0.2.1.0 (2019-10-21)</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-13">12.0.2.1.0 (2019-10-21)</a></h3>
 <ul class="simple">
 <li>[IMP] Add option to calculate depreciation table by days</li>
 </ul>
 </div>
 <div class="section" id="section-6">
-<h3><a class="toc-backref" href="#toc-entry-8">12.0.1.0.0 (2019-01-13)</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-14">12.0.1.0.0 (2019-01-13)</a></h3>
 <ul class="simple">
 <li>[BREAKING] account.asset: parent_path has replaced parent_left &amp;
 parent_right (TODO: migration script)</li>
@@ -477,7 +572,7 @@ parent_right (TODO: migration script)</li>
 </div>
 </div>
 <div class="section" id="bug-tracker">
-<h2><a class="toc-backref" href="#toc-entry-9">Bug Tracker</a></h2>
+<h2><a class="toc-backref" href="#toc-entry-15">Bug Tracker</a></h2>
 <p>Bugs are tracked on <a class="reference external" href="https://github.com/OCA/account-financial-tools/issues">GitHub Issues</a>.
 In case of trouble, please check there if your issue has already been reported.
 If you spotted it first, help us to smash it by providing a detailed and welcomed
@@ -485,15 +580,15 @@ If you spotted it first, help us to smash it by providing a detailed and welcome
 <p>Do not contact contributors directly about support or help with technical issues.</p>
 </div>
 <div class="section" id="credits">
-<h2><a class="toc-backref" href="#toc-entry-10">Credits</a></h2>
+<h2><a class="toc-backref" href="#toc-entry-16">Credits</a></h2>
 <div class="section" id="authors">
-<h3><a class="toc-backref" href="#toc-entry-11">Authors</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-17">Authors</a></h3>
 <ul class="simple">
 <li>Noviat</li>
 </ul>
 </div>
 <div class="section" id="contributors">
-<h3><a class="toc-backref" href="#toc-entry-12">Contributors</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-18">Contributors</a></h3>
 <ul class="simple">
 <li>OpenERP SA</li>
 <li>Luc De Meyer (Noviat)</li>
@@ -524,10 +619,11 @@ If you spotted it first, help us to smash it by providing a detailed and welcome
 </ul>
 </li>
 <li><a class="reference external" href="https://www.acysos.com">Acysos S.L.</a></li>
+<li>Natalia Laguna</li>
 </ul>
 </div>
 <div class="section" id="maintainers">
-<h3><a class="toc-backref" href="#toc-entry-13">Maintainers</a></h3>
+<h3><a class="toc-backref" href="#toc-entry-19">Maintainers</a></h3>
 <p>This module is maintained by the OCA.</p>
 <a class="reference external image-reference" href="https://odoo-community.org">
 <img alt="Odoo Community Association" src="https://odoo-community.org/logo.png" />
